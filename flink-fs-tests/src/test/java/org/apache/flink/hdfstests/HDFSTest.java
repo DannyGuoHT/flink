@@ -169,7 +169,7 @@ public class HDFSTest {
 
 	@Test
 	public void testChangingFileNames() {
-		org.apache.hadoop.fs.Path hdfsPath = new org.apache.hadoop.fs.Path(hdfsURI + "/hdfsTaskTest");
+		org.apache.hadoop.fs.Path hdfsPath = new org.apache.hadoop.fs.Path(hdfsURI + "/hdfsTest");
 		Path path = new Path(hdfsPath.toString());
 
 		String type = "one";
