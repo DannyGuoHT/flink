@@ -28,7 +28,7 @@ reusing code that was implemented for Hadoop MapReduce.
 
 You can:
 
-- use Hadoop's `Writable` [data types](index.html#data-types) in Flink programs.
+- use Hadoop's `Writable` [data types]({{ site.baseurl }}/dev/api_concepts.html#supported-data-types) in Flink programs.
 - use any Hadoop `InputFormat` as a [DataSource](index.html#data-sources).
 - use any Hadoop `OutputFormat` as a [DataSink](index.html#data-sinks).
 - use a Hadoop `Mapper` as [FlatMapFunction](dataset_transformations.html#flatmap).
@@ -69,15 +69,18 @@ and Reducers.
 Flink supports all Hadoop `Writable` and `WritableComparable` data types
 out-of-the-box. You do not need to include the Hadoop Compatibility dependency,
 if you only want to use your Hadoop data types. See the
-[Programming Guide](index.html#data-types) for more details.
+[Programming Guide](index.html) for more details.
 
 ### Using Hadoop InputFormats
 
-Hadoop input formats can be used to create a data source by using
-one of the methods `readHadoopFile` or `createHadoopInput` of the
-`ExecutionEnvironment`. The former is used for input formats derived
+To use Hadoop `InputFormats` with Flink the format must first be wrapped
+using either `readHadoopFile` or `createHadoopInput` of the
+`HadoopInputs` utility class.
+The former is used for input formats derived
 from `FileInputFormat` while the latter has to be used for general purpose
 input formats.
+The resulting `InputFormat` can be used to create a data source by using
+`ExecutionEnvironmen#createInput`.
 
 The resulting `DataSet` contains 2-tuples where the first field
 is the key and the second field is the value retrieved from the Hadoop
@@ -92,7 +95,8 @@ The following example shows how to use Hadoop's `TextInputFormat`.
 ExecutionEnvironment env = ExecutionEnvironment.getExecutionEnvironment();
 
 DataSet<Tuple2<LongWritable, Text>> input =
-    env.readHadoopFile(new TextInputFormat(), LongWritable.class, Text.class, textPath);
+    env.createInput(HadoopInputs.readHadoopFile(new TextInputFormat(),
+                        LongWritable.class, Text.class, textPath));
 
 // Do something with the data.
 [...]
@@ -105,7 +109,8 @@ DataSet<Tuple2<LongWritable, Text>> input =
 val env = ExecutionEnvironment.getExecutionEnvironment
 
 val input: DataSet[(LongWritable, Text)] =
-  env.readHadoopFile(new TextInputFormat, classOf[LongWritable], classOf[Text], textPath)
+  env.createInput(HadoopInputs.readHadoopFile(
+                    new TextInputFormat, classOf[LongWritable], classOf[Text], textPath))
 
 // Do something with the data.
 [...]
@@ -187,7 +192,7 @@ The following example shows how to use Hadoop `Mapper` and `Reducer` functions.
 
 {% highlight java %}
 // Obtain data to process somehow.
-DataSet<Tuple2<Text, LongWritable>> text = [...]
+DataSet<Tuple2<LongWritable, Text>> text = [...]
 
 DataSet<Tuple2<Text, LongWritable>> result = text
   // use Hadoop Mapper (Tokenizer) as MapFunction
@@ -233,9 +238,9 @@ DataSet<Tuple2<Text, LongWritable>> result = text
   ));
 
 // Set up the Hadoop TextOutputFormat.
-HadoopOutputFormat<Text, IntWritable> hadoopOF =
-  new HadoopOutputFormat<Text, IntWritable>(
-    new TextOutputFormat<Text, IntWritable>(), job
+HadoopOutputFormat<Text, LongWritable> hadoopOF =
+  new HadoopOutputFormat<Text, LongWritable>(
+    new TextOutputFormat<Text, LongWritable>(), job
   );
 hadoopOF.getConfiguration().set("mapreduce.output.textoutputformat.separator", " ");
 TextOutputFormat.setOutputPath(job, new Path(outputPath));

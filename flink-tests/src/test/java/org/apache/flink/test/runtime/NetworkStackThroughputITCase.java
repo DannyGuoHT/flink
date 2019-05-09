@@ -20,20 +20,21 @@ package org.apache.flink.test.runtime;
 
 import org.apache.flink.api.common.JobExecutionResult;
 import org.apache.flink.client.program.ClusterClient;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.io.IOReadableWritable;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputView;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.io.network.api.reader.RecordReader;
 import org.apache.flink.runtime.io.network.api.writer.RecordWriter;
+import org.apache.flink.runtime.io.network.api.writer.RecordWriterBuilder;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionType;
 import org.apache.flink.runtime.jobgraph.DistributionPattern;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobgraph.tasks.AbstractInvokable;
 import org.apache.flink.runtime.jobmanager.scheduler.SlotSharingGroup;
-import org.apache.flink.test.util.MiniClusterResource;
+import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
+import org.apache.flink.test.util.MiniClusterWithClientResource;
 import org.apache.flink.util.TestLogger;
 
 import org.junit.Test;
@@ -77,7 +78,7 @@ public class NetworkStackThroughputITCase extends TestLogger {
 
 		@Override
 		public void invoke() throws Exception {
-			RecordWriter<SpeedTestRecord> writer = new RecordWriter<>(getEnvironment().getWriter(0));
+			RecordWriter<SpeedTestRecord> writer = new RecordWriterBuilder().build(getEnvironment().getWriter(0));
 
 			try {
 				// Determine the amount of data to send per subtask
@@ -127,7 +128,7 @@ public class NetworkStackThroughputITCase extends TestLogger {
 					SpeedTestRecord.class,
 					getEnvironment().getTaskManagerInfo().getTmpDirectories());
 
-			RecordWriter<SpeedTestRecord> writer = new RecordWriter<>(getEnvironment().getWriter(0));
+			RecordWriter<SpeedTestRecord> writer = new RecordWriterBuilder().build(getEnvironment().getWriter(0));
 
 			try {
 				SpeedTestRecord record;
@@ -234,14 +235,11 @@ public class NetworkStackThroughputITCase extends TestLogger {
 
 			final int numTaskManagers = parallelism / numSlotsPerTaskManager;
 
-			final MiniClusterResource cluster = new MiniClusterResource(
-				new MiniClusterResource.MiniClusterResourceConfiguration(
-					new Configuration(),
-					numTaskManagers,
-					numSlotsPerTaskManager
-				),
-				true
-			);
+			final MiniClusterWithClientResource cluster = new MiniClusterWithClientResource(
+				new MiniClusterResourceConfiguration.Builder()
+					.setNumberTaskManagers(numTaskManagers)
+					.setNumberSlotsPerTaskManager(numSlotsPerTaskManager)
+					.build());
 			cluster.before();
 
 			try {
@@ -261,7 +259,7 @@ public class NetworkStackThroughputITCase extends TestLogger {
 	}
 
 	private void testProgram(
-			final MiniClusterResource cluster,
+			final MiniClusterWithClientResource cluster,
 			final int dataVolumeGb,
 			final boolean useForwarder,
 			final boolean isSlowSender,

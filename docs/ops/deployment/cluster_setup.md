@@ -110,7 +110,7 @@ In particular,
  * the amount of available memory per TaskManager (`taskmanager.heap.mb`),
  * the number of available CPUs per machine (`taskmanager.numberOfTaskSlots`),
  * the total number of CPUs in the cluster (`parallelism.default`) and
- * the temporary directories (`taskmanager.tmp.dirs`)
+ * the temporary directories (`io.tmp.dirs`)
 
 are very important configuration values.
 
@@ -137,7 +137,7 @@ You can add both JobManager and TaskManager instances to your running cluster wi
 #### Adding a JobManager
 
 {% highlight bash %}
-bin/jobmanager.sh ((start|start-foreground) cluster)|stop|stop-all
+bin/jobmanager.sh ((start|start-foreground) [host] [webui-port])|stop|stop-all
 {% endhighlight %}
 
 #### Adding a TaskManager

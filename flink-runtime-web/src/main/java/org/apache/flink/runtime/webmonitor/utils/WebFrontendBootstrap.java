@@ -20,7 +20,7 @@ package org.apache.flink.runtime.webmonitor.utils;
 
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.JobManagerOptions;
-import org.apache.flink.runtime.net.SSLUtils;
+import org.apache.flink.runtime.io.network.netty.SSLHandlerFactory;
 import org.apache.flink.runtime.rest.handler.router.Router;
 import org.apache.flink.runtime.rest.handler.router.RouterHandler;
 import org.apache.flink.runtime.webmonitor.HttpRequestHandler;
@@ -35,13 +35,11 @@ import org.apache.flink.shaded.netty4.io.netty.channel.nio.NioEventLoopGroup;
 import org.apache.flink.shaded.netty4.io.netty.channel.socket.SocketChannel;
 import org.apache.flink.shaded.netty4.io.netty.channel.socket.nio.NioServerSocketChannel;
 import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpServerCodec;
-import org.apache.flink.shaded.netty4.io.netty.handler.ssl.SslHandler;
 import org.apache.flink.shaded.netty4.io.netty.handler.stream.ChunkedWriteHandler;
 
 import org.slf4j.Logger;
 
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLEngine;
+import javax.annotation.Nullable;
 
 import java.io.File;
 import java.net.InetAddress;
@@ -56,7 +54,6 @@ public class WebFrontendBootstrap {
 	private final Router router;
 	private final Logger log;
 	private final File uploadDir;
-	private final SSLContext serverSSLContext;
 	private final ServerBootstrap bootstrap;
 	private final Channel serverChannel;
 	private final String restAddress;
@@ -65,14 +62,14 @@ public class WebFrontendBootstrap {
 			Router router,
 			Logger log,
 			File directory,
-			SSLContext sslContext,
+			@Nullable SSLHandlerFactory serverSSLFactory,
 			String configuredAddress,
 			int configuredPort,
 			final Configuration config) throws InterruptedException, UnknownHostException {
+
 		this.router = Preconditions.checkNotNull(router);
 		this.log = Preconditions.checkNotNull(log);
 		this.uploadDir = directory;
-		this.serverSSLContext = sslContext;
 
 		ChannelInitializer<SocketChannel> initializer = new ChannelInitializer<SocketChannel>() {
 
@@ -81,11 +78,8 @@ public class WebFrontendBootstrap {
 				RouterHandler handler = new RouterHandler(WebFrontendBootstrap.this.router, new HashMap<>());
 
 				// SSL should be the first handler in the pipeline
-				if (serverSSLContext != null) {
-					SSLEngine sslEngine = serverSSLContext.createSSLEngine();
-					SSLUtils.setSSLVerAndCipherSuites(sslEngine, config);
-					sslEngine.setUseClientMode(false);
-					ch.pipeline().addLast("ssl", new SslHandler(sslEngine));
+				if (serverSSLFactory != null) {
+					ch.pipeline().addLast("ssl", serverSSLFactory.createNettySSLHandler());
 				}
 
 				ch.pipeline()
@@ -129,7 +123,7 @@ public class WebFrontendBootstrap {
 
 		this.log.info("Web frontend listening at {}" + ':' + "{}", address, port);
 
-		final String protocol = serverSSLContext != null ? "https://" : "http://";
+		final String protocol = serverSSLFactory != null ? "https://" : "http://";
 
 		this.restAddress = protocol + address + ':' + port;
 	}

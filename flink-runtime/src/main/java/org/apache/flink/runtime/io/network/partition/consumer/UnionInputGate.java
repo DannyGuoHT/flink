@@ -130,6 +130,12 @@ public class UnionInputGate implements InputGate, InputGateListener {
 	}
 
 	@Override
+	public String getOwningTaskName() {
+		// all input gates have the same owning task
+		return inputGates[0].getOwningTaskName();
+	}
+
+	@Override
 	public boolean isFinished() {
 		for (InputGate inputGate : inputGates) {
 			if (!inputGate.isFinished()) {
@@ -256,6 +262,10 @@ public class UnionInputGate implements InputGate, InputGateListener {
 			}
 		}
 		return pageSize;
+	}
+
+	@Override
+	public void close() throws IOException {
 	}
 
 	@Override

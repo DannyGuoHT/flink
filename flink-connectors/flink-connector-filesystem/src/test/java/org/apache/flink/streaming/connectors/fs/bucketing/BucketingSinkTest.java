@@ -28,7 +28,6 @@ import org.apache.flink.streaming.connectors.fs.AvroKeyValueSinkWriter;
 import org.apache.flink.streaming.connectors.fs.Clock;
 import org.apache.flink.streaming.connectors.fs.SequenceFileWriter;
 import org.apache.flink.streaming.connectors.fs.StringWriter;
-import org.apache.flink.streaming.connectors.fs.Writer;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.util.AbstractStreamOperatorTestHarness;
 import org.apache.flink.streaming.util.OneInputStreamOperatorTestHarness;
@@ -65,6 +64,8 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -73,6 +74,8 @@ import static org.apache.flink.streaming.connectors.fs.bucketing.BucketingSinkTe
 import static org.apache.flink.streaming.connectors.fs.bucketing.BucketingSinkTestUtils.PENDING_SUFFIX;
 import static org.apache.flink.streaming.connectors.fs.bucketing.BucketingSinkTestUtils.VALID_LENGTH_SUFFIX;
 import static org.apache.flink.streaming.connectors.fs.bucketing.BucketingSinkTestUtils.checkLocalFs;
+import static org.hamcrest.CoreMatchers.is;
+import static org.hamcrest.MatcherAssert.assertThat;
 
 /**
  * Tests for the {@link BucketingSink}.
@@ -84,6 +87,8 @@ public class BucketingSinkTest extends TestLogger {
 	private static MiniDFSCluster hdfsCluster;
 	private static org.apache.hadoop.fs.FileSystem dfs;
 	private static String hdfsURI;
+
+	private final int maxParallelism = 10;
 
 	private OneInputStreamOperatorTestHarness<String, Object> createRescalingTestSink(
 		File outDir, int totalParallelism, int taskIdx, long inactivityInterval) throws Exception {
@@ -134,7 +139,7 @@ public class BucketingSinkTest extends TestLogger {
 
 	private <T> OneInputStreamOperatorTestHarness<T, Object> createTestSink(
 			BucketingSink<T> sink, int totalParallelism, int taskIdx) throws Exception {
-		return new OneInputStreamOperatorTestHarness<>(new StreamSink<>(sink), 10, totalParallelism, taskIdx);
+		return new OneInputStreamOperatorTestHarness<>(new StreamSink<>(sink), maxParallelism, totalParallelism, taskIdx);
 	}
 
 	private OneInputStreamOperatorTestHarness<String, Object> createRescalingTestSinkWithRollover(
@@ -326,18 +331,24 @@ public class BucketingSinkTest extends TestLogger {
 		testHarness2.processElement(new StreamRecord<>("test3", 0L));
 		checkLocalFs(outDir, 3, 0, 0, 0);
 
+		OperatorSubtaskState initState1 = AbstractStreamOperatorTestHarness.repartitionOperatorState(
+			mergedSnapshot, maxParallelism, 2, 2, 0);
+
 		testHarness1 = createRescalingTestSink(outDir, 2, 0, 100);
 		testHarness1.setup();
-		testHarness1.initializeState(mergedSnapshot);
+		testHarness1.initializeState(initState1);
 		testHarness1.open();
 
 		// the one in-progress will be the one assigned to the next instance,
 		// the other is the test3 which is just not cleaned up
 		checkLocalFs(outDir, 2, 0, 1, 1);
 
+		OperatorSubtaskState initState2 = AbstractStreamOperatorTestHarness.repartitionOperatorState(
+			mergedSnapshot, maxParallelism, 2, 2, 1);
+
 		testHarness2 = createRescalingTestSink(outDir, 2, 1, 100);
 		testHarness2.setup();
-		testHarness2.initializeState(mergedSnapshot);
+		testHarness2.initializeState(initState2);
 		testHarness2.open();
 
 		checkLocalFs(outDir, 1, 0, 2, 2);
@@ -382,16 +393,22 @@ public class BucketingSinkTest extends TestLogger {
 			testHarness2.snapshot(0, 0)
 		);
 
+		OperatorSubtaskState initState1 = AbstractStreamOperatorTestHarness.repartitionOperatorState(
+			mergedSnapshot, maxParallelism, 3, 2, 0);
+
 		testHarness1 = createRescalingTestSink(outDir, 2, 0, 100);
 		testHarness1.setup();
-		testHarness1.initializeState(mergedSnapshot);
+		testHarness1.initializeState(initState1);
 		testHarness1.open();
 
 		checkLocalFs(outDir, 1, 0, 3, 3);
 
+		OperatorSubtaskState initState2 = AbstractStreamOperatorTestHarness.repartitionOperatorState(
+			mergedSnapshot, maxParallelism, 3, 2, 1);
+
 		testHarness2 = createRescalingTestSink(outDir, 2, 1, 100);
 		testHarness2.setup();
-		testHarness2.initializeState(mergedSnapshot);
+		testHarness2.initializeState(initState2);
 		testHarness2.open();
 
 		checkLocalFs(outDir, 0, 0, 4, 4);
@@ -426,23 +443,32 @@ public class BucketingSinkTest extends TestLogger {
 			testHarness1.snapshot(0, 0)
 		);
 
+		OperatorSubtaskState initState1 = AbstractStreamOperatorTestHarness.repartitionOperatorState(
+			mergedSnapshot, maxParallelism, 2, 3, 0);
+
 		testHarness1 = createRescalingTestSink(outDir, 3, 0, 100);
 		testHarness1.setup();
-		testHarness1.initializeState(mergedSnapshot);
+		testHarness1.initializeState(initState1);
 		testHarness1.open();
 
 		checkLocalFs(outDir, 2, 0, 3, 3);
 
+		OperatorSubtaskState initState2 = AbstractStreamOperatorTestHarness.repartitionOperatorState(
+			mergedSnapshot, maxParallelism, 2, 3, 1);
+
 		testHarness2 = createRescalingTestSink(outDir, 3, 1, 100);
 		testHarness2.setup();
-		testHarness2.initializeState(mergedSnapshot);
+		testHarness2.initializeState(initState2);
 		testHarness2.open();
 
 		checkLocalFs(outDir, 0, 0, 5, 5);
 
+		OperatorSubtaskState initState3 = AbstractStreamOperatorTestHarness.repartitionOperatorState(
+			mergedSnapshot, maxParallelism, 2, 3, 2);
+
 		OneInputStreamOperatorTestHarness<String, Object> testHarness3 = createRescalingTestSink(outDir, 3, 2, 100);
 		testHarness3.setup();
-		testHarness3.initializeState(mergedSnapshot);
+		testHarness3.initializeState(initState3);
 		testHarness3.open();
 
 		checkLocalFs(outDir, 0, 0, 5, 5);
@@ -900,6 +926,81 @@ public class BucketingSinkTest extends TestLogger {
 		inStream.close();
 	}
 
+	@Test
+	public void testThatPartIndexIsIncrementedWhenPartSuffixIsSpecifiedAndPreviousPartFileInProgressState()
+		throws Exception {
+		testThatPartIndexIsIncremented(".my", "part-0-0.my" + IN_PROGRESS_SUFFIX);
+	}
+
+	@Test
+	public void testThatPartIndexIsIncrementedWhenPartSuffixIsSpecifiedAndPreviousPartFileInPendingState()
+		throws Exception {
+		testThatPartIndexIsIncremented(".my", "part-0-0.my" + PENDING_SUFFIX);
+	}
+
+	@Test
+	public void testThatPartIndexIsIncrementedWhenPartSuffixIsSpecifiedAndPreviousPartFileInFinalState()
+		throws Exception {
+		testThatPartIndexIsIncremented(".my", "part-0-0.my");
+	}
+
+	@Test
+	public void testThatPartIndexIsIncrementedWhenPartSuffixIsNotSpecifiedAndPreviousPartFileInProgressState()
+		throws Exception {
+		testThatPartIndexIsIncremented(null, "part-0-0" + IN_PROGRESS_SUFFIX);
+	}
+
+	@Test
+	public void testThatPartIndexIsIncrementedWhenPartSuffixIsNotSpecifiedAndPreviousPartFileInPendingState()
+		throws Exception {
+		testThatPartIndexIsIncremented(null, "part-0-0" + PENDING_SUFFIX);
+	}
+
+	@Test
+	public void testThatPartIndexIsIncrementedWhenPartSuffixIsNotSpecifiedAndPreviousPartFileInFinalState()
+		throws Exception {
+		testThatPartIndexIsIncremented(null, "part-0-0");
+	}
+
+	private void testThatPartIndexIsIncremented(String partSuffix, String existingPartFile) throws Exception {
+		File outDir = tempFolder.newFolder();
+		long inactivityInterval = 100;
+
+		java.nio.file.Path bucket = Paths.get(outDir.getPath());
+		Files.createFile(bucket.resolve(existingPartFile));
+
+		String basePath = outDir.getAbsolutePath();
+		BucketingSink<String> sink = new BucketingSink<String>(basePath)
+			.setBucketer(new BasePathBucketer<>())
+			.setInactiveBucketCheckInterval(inactivityInterval)
+			.setInactiveBucketThreshold(inactivityInterval)
+			.setPartPrefix(PART_PREFIX)
+			.setInProgressPrefix("")
+			.setPendingPrefix("")
+			.setValidLengthPrefix("")
+			.setInProgressSuffix(IN_PROGRESS_SUFFIX)
+			.setPendingSuffix(PENDING_SUFFIX)
+			.setValidLengthSuffix(VALID_LENGTH_SUFFIX)
+			.setPartSuffix(partSuffix)
+			.setBatchSize(0);
+
+		try (OneInputStreamOperatorTestHarness<String, Object> testHarness = createTestSink(sink, 1, 0)) {
+			testHarness.setup();
+			testHarness.open();
+
+			testHarness.setProcessingTime(0L);
+
+			testHarness.processElement(new StreamRecord<>("test1", 1L));
+
+			testHarness.setProcessingTime(101L);
+			testHarness.snapshot(0, 0);
+			testHarness.notifyOfCompletedCheckpoint(0);
+		}
+
+		String expectedFileName = partSuffix == null ? "part-0-1" : "part-0-1" + partSuffix;
+		assertThat(Files.exists(bucket.resolve(expectedFileName)), is(true));
+	}
+
 	private static class StreamWriterWithConfigCheck<K, V> extends AvroKeyValueSinkWriter<K, V> {
 		private Map<String, String> properties;
 		private String key;
@@ -918,7 +1019,7 @@ public class BucketingSinkTest extends TestLogger {
 		}
 
 		@Override
-		public Writer<Tuple2<K, V>> duplicate() {
+		public StreamWriterWithConfigCheck<K, V> duplicate() {
 			return new StreamWriterWithConfigCheck<>(properties, key, expect);
 		}
 	}

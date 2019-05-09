@@ -20,26 +20,28 @@ package org.apache.flink.runtime.io.network.partition.consumer;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.core.memory.MemorySegment;
+import org.apache.flink.metrics.Counter;
 import org.apache.flink.runtime.deployment.InputChannelDeploymentDescriptor;
 import org.apache.flink.runtime.deployment.InputGateDeploymentDescriptor;
 import org.apache.flink.runtime.deployment.ResultPartitionLocation;
 import org.apache.flink.runtime.event.AbstractEvent;
 import org.apache.flink.runtime.event.TaskEvent;
-import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
 import org.apache.flink.runtime.io.network.NetworkEnvironment;
+import org.apache.flink.runtime.io.network.TaskEventPublisher;
 import org.apache.flink.runtime.io.network.api.EndOfPartitionEvent;
 import org.apache.flink.runtime.io.network.api.serialization.EventSerializer;
 import org.apache.flink.runtime.io.network.buffer.Buffer;
 import org.apache.flink.runtime.io.network.buffer.BufferPool;
 import org.apache.flink.runtime.io.network.buffer.BufferProvider;
 import org.apache.flink.runtime.io.network.buffer.NetworkBufferPool;
+import org.apache.flink.runtime.io.network.metrics.InputChannelMetrics;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionID;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionType;
 import org.apache.flink.runtime.io.network.partition.consumer.InputChannel.BufferAndAvailability;
 import org.apache.flink.runtime.jobgraph.DistributionPattern;
 import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
 import org.apache.flink.runtime.jobgraph.IntermediateResultPartitionID;
-import org.apache.flink.runtime.metrics.groups.TaskIOMetricGroup;
+import org.apache.flink.runtime.taskmanager.NetworkEnvironmentConfiguration;
 import org.apache.flink.runtime.taskmanager.TaskActions;
 
 import org.slf4j.Logger;
@@ -62,10 +64,10 @@ import static org.apache.flink.util.Preconditions.checkState;
 /**
  * An input gate consumes one or more partitions of a single produced intermediate result.
  *
- * <p> Each intermediate result is partitioned over its producing parallel subtasks; each of these
+ * <p>Each intermediate result is partitioned over its producing parallel subtasks; each of these
  * partitions is furthermore partitioned into one or more subpartitions.
  *
- * <p> As an example, consider a map-reduce program, where the map operator produces data and the
+ * <p>As an example, consider a map-reduce program, where the map operator produces data and the
  * reduce operator consumes the produced data.
  *
  * <pre>{@code
@@ -74,7 +76,7 @@ import static org.apache.flink.util.Preconditions.checkState;
  * +-----+              +---------------------+              +--------+
  * }</pre>
  *
- * <p> When deploying such a program in parallel, the intermediate result will be partitioned over its
+ * <p>When deploying such a program in parallel, the intermediate result will be partitioned over its
  * producing parallel subtasks; each of these partitions is furthermore partitioned into one or more
  * subpartitions.
  *
@@ -95,7 +97,7 @@ import static org.apache.flink.util.Preconditions.checkState;
  *               +-----------------------------------------+
  * }</pre>
  *
- * <p> In the above example, two map subtasks produce the intermediate result in parallel, resulting
+ * <p>In the above example, two map subtasks produce the intermediate result in parallel, resulting
  * in two partitions (Partition 1 and 2). Each of these partitions is further partitioned into two
  * subpartitions -- one for each parallel reduce subtask.
  */
@@ -183,6 +185,8 @@ public class SingleInputGate implements InputGate {
 	/** A timer to retrigger local partition requests. Only initialized if actually needed. */
 	private Timer retriggerLocalRequestTimer;
 
+	private final Counter numBytesIn;
+
 	public SingleInputGate(
 		String owningTaskName,
 		JobID jobId,
@@ -191,7 +195,7 @@ public class SingleInputGate implements InputGate {
 		int consumedSubpartitionIndex,
 		int numberOfInputChannels,
 		TaskActions taskActions,
-		TaskIOMetricGroup metrics,
+		Counter numBytesIn,
 		boolean isCreditBased) {
 
 		this.owningTaskName = checkNotNull(owningTaskName);
@@ -211,6 +215,9 @@ public class SingleInputGate implements InputGate {
 		this.enqueuedInputChannelsWithData = new BitSet(numberOfInputChannels);
 
 		this.taskActions = checkNotNull(taskActions);
+
+		this.numBytesIn = checkNotNull(numBytesIn);
+
 		this.isCreditBased = isCreditBased;
 	}
 
@@ -272,6 +279,11 @@ public class SingleInputGate implements InputGate {
 		}
 
 		return 0;
+	}
+
+	@Override
+	public String getOwningTaskName() {
+		return owningTaskName;
 	}
 
 	// ------------------------------------------------------------------------
@@ -364,7 +376,7 @@ public class SingleInputGate implements InputGate {
 					throw new IllegalStateException("Tried to update unknown channel with unknown channel.");
 				}
 
-				LOG.debug("Updated unknown input channel to {}.", newChannel);
+				LOG.debug("{}: Updated unknown input channel to {}.", owningTaskName, newChannel);
 
 				inputChannels.put(partitionId, newChannel);
 
@@ -393,7 +405,7 @@ public class SingleInputGate implements InputGate {
 
 				checkNotNull(ch, "Unknown input channel with ID " + partitionId);
 
-				LOG.debug("Retriggering partition request {}:{}.", ch.partitionId, consumedSubpartitionIndex);
+				LOG.debug("{}: Retriggering partition request {}:{}.", owningTaskName, ch.partitionId, consumedSubpartitionIndex);
 
 				if (ch.getClass() == RemoteInputChannel.class) {
 					final RemoteInputChannel rch = (RemoteInputChannel) ch;
@@ -416,7 +428,8 @@ public class SingleInputGate implements InputGate {
 		}
 	}
 
-	public void releaseAllResources() throws IOException {
+	@Override
+	public void close() throws IOException {
 		boolean released = false;
 		synchronized (requestLock) {
 			if (!isReleased) {
@@ -432,7 +445,8 @@ public class SingleInputGate implements InputGate {
 							inputChannel.releaseAllResources();
 						}
 						catch (IOException e) {
-							LOG.warn("Error during release of channel resources: " + e.getMessage(), e);
+							LOG.warn("{}: Error during release of channel resources: {}.",
+								owningTaskName, e.getMessage(), e);
 						}
 					}
 
@@ -479,7 +493,7 @@ public class SingleInputGate implements InputGate {
 
 				// Sanity checks
 				if (numberOfInputChannels != inputChannels.size()) {
-					throw new IllegalStateException("Bug in input gate setup logic: mismatch between" +
+					throw new IllegalStateException("Bug in input gate setup logic: mismatch between " +
 							"number of total input channels and the currently set number of input " +
 							"channels.");
 				}
@@ -539,7 +553,7 @@ public class SingleInputGate implements InputGate {
 
 				currentChannel = inputChannelsWithData.remove();
 				enqueuedInputChannelsWithData.clear(currentChannel.getChannelIndex());
-				moreAvailable = inputChannelsWithData.size() > 0;
+				moreAvailable = !inputChannelsWithData.isEmpty();
 			}
 
 			result = currentChannel.getNextBuffer();
@@ -554,6 +568,7 @@ public class SingleInputGate implements InputGate {
 		}
 
 		final Buffer buffer = result.get().buffer();
+		numBytesIn.inc(buffer.getSizeUnsafe());
 		if (buffer.isBuffer()) {
 			return Optional.of(new BufferOrEvent(buffer, currentChannel.getChannelIndex(), moreAvailable));
 		}
@@ -643,7 +658,7 @@ public class SingleInputGate implements InputGate {
 
 	// ------------------------------------------------------------------------
 
-	Map<IntermediateResultPartitionID, InputChannel> getInputChannels() {
+	public Map<IntermediateResultPartitionID, InputChannel> getInputChannels() {
 		return inputChannels;
 	}
 
@@ -655,11 +670,12 @@ public class SingleInputGate implements InputGate {
 	public static SingleInputGate create(
 		String owningTaskName,
 		JobID jobId,
-		ExecutionAttemptID executionId,
 		InputGateDeploymentDescriptor igdd,
 		NetworkEnvironment networkEnvironment,
+		TaskEventPublisher taskEventPublisher,
 		TaskActions taskActions,
-		TaskIOMetricGroup metrics) {
+		InputChannelMetrics metrics,
+		Counter numBytesInCounter) {
 
 		final IntermediateDataSetID consumedResultId = checkNotNull(igdd.getConsumedResultId());
 		final ResultPartitionType consumedPartitionType = checkNotNull(igdd.getConsumedPartitionType());
@@ -669,9 +685,11 @@ public class SingleInputGate implements InputGate {
 
 		final InputChannelDeploymentDescriptor[] icdd = checkNotNull(igdd.getInputChannelDeploymentDescriptors());
 
+		final NetworkEnvironmentConfiguration networkConfig = networkEnvironment.getConfiguration();
+
 		final SingleInputGate inputGate = new SingleInputGate(
 			owningTaskName, jobId, consumedResultId, consumedPartitionType, consumedSubpartitionIndex,
-			icdd.length, taskActions, metrics, networkEnvironment.isCreditBased());
+			icdd.length, taskActions, numBytesInCounter, networkConfig.isCreditBased());
 
 		// Create the input channels. There is one input channel for each consumed partition.
 		final InputChannel[] inputChannels = new InputChannel[icdd.length];
@@ -687,9 +705,9 @@ public class SingleInputGate implements InputGate {
 			if (partitionLocation.isLocal()) {
 				inputChannels[i] = new LocalInputChannel(inputGate, i, partitionId,
 					networkEnvironment.getResultPartitionManager(),
-					networkEnvironment.getTaskEventDispatcher(),
-					networkEnvironment.getPartitionRequestInitialBackoff(),
-					networkEnvironment.getPartitionRequestMaxBackoff(),
+					taskEventPublisher,
+					networkConfig.partitionRequestInitialBackoff(),
+					networkConfig.partitionRequestMaxBackoff(),
 					metrics
 				);
 
@@ -699,8 +717,8 @@ public class SingleInputGate implements InputGate {
 				inputChannels[i] = new RemoteInputChannel(inputGate, i, partitionId,
 					partitionLocation.getConnectionId(),
 					networkEnvironment.getConnectionManager(),
-					networkEnvironment.getPartitionRequestInitialBackoff(),
-					networkEnvironment.getPartitionRequestMaxBackoff(),
+					networkConfig.partitionRequestInitialBackoff(),
+					networkConfig.partitionRequestMaxBackoff(),
 					metrics
 				);
 
@@ -709,10 +727,10 @@ public class SingleInputGate implements InputGate {
 			else if (partitionLocation.isUnknown()) {
 				inputChannels[i] = new UnknownInputChannel(inputGate, i, partitionId,
 					networkEnvironment.getResultPartitionManager(),
-					networkEnvironment.getTaskEventDispatcher(),
+					taskEventPublisher,
 					networkEnvironment.getConnectionManager(),
-					networkEnvironment.getPartitionRequestInitialBackoff(),
-					networkEnvironment.getPartitionRequestMaxBackoff(),
+					networkConfig.partitionRequestInitialBackoff(),
+					networkConfig.partitionRequestMaxBackoff(),
 					metrics
 				);
 
@@ -725,7 +743,8 @@ public class SingleInputGate implements InputGate {
 			inputGate.setInputChannel(partitionId.getPartitionId(), inputChannels[i]);
 		}
 
-		LOG.debug("Created {} input channels (local: {}, remote: {}, unknown: {}).",
+		LOG.debug("{}: Created {} input channels (local: {}, remote: {}, unknown: {}).",
+			owningTaskName,
 			inputChannels.length,
 			numLocalChannels,
 			numRemoteChannels,

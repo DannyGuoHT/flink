@@ -510,7 +510,7 @@ data.map(new MapFunction<String, Integer> () {
 
 #### Java 8 Lambdas
 
-Flink also supports Java 8 Lambdas in the Java API. Please see the full [Java 8 Guide]({{ site.baseurl }}/dev/java8.html).
+Flink also supports Java 8 Lambdas in the Java API.
 
 {% highlight java %}
 data.filter(s -> s.startsWith("http://"));
@@ -783,7 +783,7 @@ defined in the `write()`and `readFields()` methods will be used for serializatio
 
 You can use special types, including Scala's `Either`, `Option`, and `Try`.
 The Java API has its own custom implementation of `Either`.
-Similarly to Scala's `Either`, it represents a value of one two possible types, *Left* or *Right*.
+Similarly to Scala's `Either`, it represents a value of two possible types, *Left* or *Right*.
 `Either` can be useful for error handling or operators that need to output two different types of records.
 
 #### Type Erasure & Type Inference

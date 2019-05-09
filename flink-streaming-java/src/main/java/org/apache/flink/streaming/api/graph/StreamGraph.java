@@ -19,6 +19,7 @@ package org.apache.flink.streaming.api.graph;
 
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.io.InputFormat;
 import org.apache.flink.api.common.operators.ResourceSpec;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
@@ -35,7 +36,6 @@ import org.apache.flink.streaming.api.collector.selector.OutputSelector;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.operators.OutputTypeConfigurable;
-import org.apache.flink.streaming.api.operators.StoppableStreamSource;
 import org.apache.flink.streaming.api.operators.StreamOperator;
 import org.apache.flink.streaming.api.operators.StreamSource;
 import org.apache.flink.streaming.api.operators.TwoInputStreamOperator;
@@ -44,7 +44,6 @@ import org.apache.flink.streaming.runtime.partitioner.RebalancePartitioner;
 import org.apache.flink.streaming.runtime.partitioner.StreamPartitioner;
 import org.apache.flink.streaming.runtime.tasks.OneInputStreamTask;
 import org.apache.flink.streaming.runtime.tasks.SourceStreamTask;
-import org.apache.flink.streaming.runtime.tasks.StoppableSourceStreamTask;
 import org.apache.flink.streaming.runtime.tasks.StreamIterationHead;
 import org.apache.flink.streaming.runtime.tasks.StreamIterationTail;
 import org.apache.flink.streaming.runtime.tasks.TwoInputStreamTask;
@@ -52,6 +51,8 @@ import org.apache.flink.util.OutputTag;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.annotation.Nullable;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -163,38 +164,39 @@ public class StreamGraph extends StreamingPlan {
 
 	public <IN, OUT> void addSource(Integer vertexID,
 		String slotSharingGroup,
+		@Nullable String coLocationGroup,
 		StreamOperator<OUT> operatorObject,
 		TypeInformation<IN> inTypeInfo,
 		TypeInformation<OUT> outTypeInfo,
 		String operatorName) {
-		addOperator(vertexID, slotSharingGroup, operatorObject, inTypeInfo, outTypeInfo, operatorName);
+		addOperator(vertexID, slotSharingGroup, coLocationGroup, operatorObject, inTypeInfo, outTypeInfo, operatorName);
 		sources.add(vertexID);
 	}
 
 	public <IN, OUT> void addSink(Integer vertexID,
 		String slotSharingGroup,
+		@Nullable String coLocationGroup,
 		StreamOperator<OUT> operatorObject,
 		TypeInformation<IN> inTypeInfo,
 		TypeInformation<OUT> outTypeInfo,
 		String operatorName) {
-		addOperator(vertexID, slotSharingGroup, operatorObject, inTypeInfo, outTypeInfo, operatorName);
+		addOperator(vertexID, slotSharingGroup, coLocationGroup, operatorObject, inTypeInfo, outTypeInfo, operatorName);
 		sinks.add(vertexID);
 	}
 
 	public <IN, OUT> void addOperator(
 			Integer vertexID,
 			String slotSharingGroup,
+			@Nullable String coLocationGroup,
 			StreamOperator<OUT> operatorObject,
 			TypeInformation<IN> inTypeInfo,
 			TypeInformation<OUT> outTypeInfo,
 			String operatorName) {
 
-		if (operatorObject instanceof StoppableStreamSource) {
-			addNode(vertexID, slotSharingGroup, StoppableSourceStreamTask.class, operatorObject, operatorName);
-		} else if (operatorObject instanceof StreamSource) {
-			addNode(vertexID, slotSharingGroup, SourceStreamTask.class, operatorObject, operatorName);
+		if (operatorObject instanceof StreamSource) {
+			addNode(vertexID, slotSharingGroup, coLocationGroup, SourceStreamTask.class, operatorObject, operatorName);
 		} else {
-			addNode(vertexID, slotSharingGroup, OneInputStreamTask.class, operatorObject, operatorName);
+			addNode(vertexID, slotSharingGroup, coLocationGroup, OneInputStreamTask.class, operatorObject, operatorName);
 		}
 
 		TypeSerializer<IN> inSerializer = inTypeInfo != null && !(inTypeInfo instanceof MissingTypeInfo) ? inTypeInfo.createSerializer(executionConfig) : null;
@@ -223,13 +225,14 @@ public class StreamGraph extends StreamingPlan {
 	public <IN1, IN2, OUT> void addCoOperator(
 			Integer vertexID,
 			String slotSharingGroup,
+			@Nullable String coLocationGroup,
 			TwoInputStreamOperator<IN1, IN2, OUT> taskOperatorObject,
 			TypeInformation<IN1> in1TypeInfo,
 			TypeInformation<IN2> in2TypeInfo,
 			TypeInformation<OUT> outTypeInfo,
 			String operatorName) {
 
-		addNode(vertexID, slotSharingGroup, TwoInputStreamTask.class, taskOperatorObject, operatorName);
+		addNode(vertexID, slotSharingGroup, coLocationGroup, TwoInputStreamTask.class, taskOperatorObject, operatorName);
 
 		TypeSerializer<OUT> outSerializer = (outTypeInfo != null) && !(outTypeInfo instanceof MissingTypeInfo) ?
 				outTypeInfo.createSerializer(executionConfig) : null;
@@ -250,6 +253,7 @@ public class StreamGraph extends StreamingPlan {
 
 	protected StreamNode addNode(Integer vertexID,
 		String slotSharingGroup,
+		@Nullable String coLocationGroup,
 		Class<? extends AbstractInvokable> vertexClass,
 		StreamOperator<?> operatorObject,
 		String operatorName) {
@@ -261,6 +265,7 @@ public class StreamGraph extends StreamingPlan {
 		StreamNode vertex = new StreamNode(environment,
 			vertexID,
 			slotSharingGroup,
+			coLocationGroup,
 			operatorObject,
 			operatorName,
 			new ArrayList<OutputSelector<?>>(),
@@ -593,6 +598,7 @@ public class StreamGraph extends StreamingPlan {
 		ResourceSpec preferredResources) {
 		StreamNode source = this.addNode(sourceId,
 			null,
+			null,
 			StreamIterationHead.class,
 			null,
 			"IterationSource-" + loopId);
@@ -602,6 +608,7 @@ public class StreamGraph extends StreamingPlan {
 		setResources(source.getId(), minResources, preferredResources);
 
 		StreamNode sink = this.addNode(sinkId,
+			null,
 			null,
 			StreamIterationTail.class,
 			null,
@@ -624,9 +631,17 @@ public class StreamGraph extends StreamingPlan {
 		return iterationSourceSinkPairs;
 	}
 
+	public StreamNode getSourceVertex(StreamEdge edge) {
+		return streamNodes.get(edge.getSourceId());
+	}
+
+	public StreamNode getTargetVertex(StreamEdge edge) {
+		return streamNodes.get(edge.getTargetId());
+	}
+
 	private void removeEdge(StreamEdge edge) {
-		edge.getSourceVertex().getOutEdges().remove(edge);
-		edge.getTargetVertex().getInEdges().remove(edge);
+		getSourceVertex(edge).getOutEdges().remove(edge);
+		getTargetVertex(edge).getInEdges().remove(edge);
 	}
 
 	private void removeVertex(StreamNode toRemove) {
@@ -642,19 +657,20 @@ public class StreamGraph extends StreamingPlan {
 	}
 
 	/**
-	 * Gets the assembled {@link JobGraph}.
+	 * Gets the assembled {@link JobGraph} with a given job id.
 	 */
 	@SuppressWarnings("deprecation")
-	public JobGraph getJobGraph() {
+	@Override
+	public JobGraph getJobGraph(@Nullable JobID jobID) {
 		// temporarily forbid checkpointing for iterative jobs
 		if (isIterative() && checkpointConfig.isCheckpointingEnabled() && !checkpointConfig.isForceCheckpointing()) {
 			throw new UnsupportedOperationException(
-					"Checkpointing is currently not supported by default for iterative jobs, as we cannot guarantee exactly once semantics. "
-							+ "State checkpoints happen normally, but records in-transit during the snapshot will be lost upon failure. "
-							+ "\nThe user can force enable state checkpoints with the reduced guarantees by calling: env.enableCheckpointing(interval,true)");
+				"Checkpointing is currently not supported by default for iterative jobs, as we cannot guarantee exactly once semantics. "
+					+ "State checkpoints happen normally, but records in-transit during the snapshot will be lost upon failure. "
+					+ "\nThe user can force enable state checkpoints with the reduced guarantees by calling: env.enableCheckpointing(interval,true)");
 		}
 
-		return StreamingJobGraphGenerator.createJobGraph(this);
+		return StreamingJobGraphGenerator.createJobGraph(this, jobID);
 	}
 
 	@Override

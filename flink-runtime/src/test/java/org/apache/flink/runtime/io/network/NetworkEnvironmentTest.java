@@ -21,19 +21,16 @@ package org.apache.flink.runtime.io.network;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.runtime.io.disk.iomanager.IOManager;
-import org.apache.flink.runtime.io.network.buffer.NetworkBufferPool;
+import org.apache.flink.runtime.io.network.partition.InputChannelTestUtils;
+import org.apache.flink.runtime.io.network.partition.NoOpResultPartitionConsumableNotifier;
 import org.apache.flink.runtime.io.network.partition.ResultPartition;
-import org.apache.flink.runtime.io.network.partition.ResultPartitionConsumableNotifier;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionID;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionManager;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionType;
 import org.apache.flink.runtime.io.network.partition.consumer.RemoteInputChannel;
 import org.apache.flink.runtime.io.network.partition.consumer.SingleInputGate;
-import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
-import org.apache.flink.runtime.metrics.groups.UnregisteredMetricGroups;
-import org.apache.flink.runtime.query.KvStateRegistry;
+import org.apache.flink.runtime.taskmanager.NoOpTaskActions;
 import org.apache.flink.runtime.taskmanager.Task;
-import org.apache.flink.runtime.taskmanager.TaskActions;
 
 import org.junit.Rule;
 import org.junit.Test;
@@ -58,9 +55,6 @@ import static org.powermock.api.mockito.PowerMockito.spy;
  */
 @RunWith(Parameterized.class)
 public class NetworkEnvironmentTest {
-	private static final int numBuffers = 1024;
-
-	private static final int memorySegmentSize = 128;
 
 	@Parameterized.Parameter
 	public boolean enableCreditBasedFlowControl;
@@ -79,21 +73,9 @@ public class NetworkEnvironmentTest {
 	 */
 	@Test
 	public void testRegisterTaskUsesBoundedBuffers() throws Exception {
-
-		final NetworkEnvironment network = new NetworkEnvironment(
-			new NetworkBufferPool(numBuffers, memorySegmentSize),
-			new LocalConnectionManager(),
-			new ResultPartitionManager(),
-			new TaskEventDispatcher(),
-			new KvStateRegistry(),
-			null,
-			null,
-			IOManager.IOMode.SYNC,
-			0,
-			0,
-			2,
-			8,
-			enableCreditBasedFlowControl);
+		final NetworkEnvironment network = new NetworkEnvironmentBuilder()
+			.setIsCreditBased(enableCreditBasedFlowControl)
+			.build();
 
 		// result partitions
 		ResultPartition rp1 = createResultPartition(ResultPartitionType.PIPELINED, 2);
@@ -149,7 +131,7 @@ public class NetworkEnvironmentTest {
 			rp.release();
 		}
 		for (SingleInputGate ig : inputGates) {
-			ig.releaseAllResources();
+			ig.close();
 		}
 		network.shutdown();
 	}
@@ -196,20 +178,10 @@ public class NetworkEnvironmentTest {
 	}
 
 	private void testRegisterTaskWithLimitedBuffers(int bufferPoolSize) throws Exception {
-		final NetworkEnvironment network = new NetworkEnvironment(
-			new NetworkBufferPool(bufferPoolSize, memorySegmentSize),
-			new LocalConnectionManager(),
-			new ResultPartitionManager(),
-			new TaskEventDispatcher(),
-			new KvStateRegistry(),
-			null,
-			null,
-			IOManager.IOMode.SYNC,
-			0,
-			0,
-			2,
-			8,
-			enableCreditBasedFlowControl);
+		final NetworkEnvironment network = new NetworkEnvironmentBuilder()
+			.setNumNetworkBuffers(bufferPoolSize)
+			.setIsCreditBased(enableCreditBasedFlowControl)
+			.build();
 
 		final ConnectionManager connManager = createDummyConnectionManager();
 
@@ -285,7 +257,7 @@ public class NetworkEnvironmentTest {
 			rp.release();
 		}
 		for (SingleInputGate ig : inputGates) {
-			ig.releaseAllResources();
+			ig.close();
 		}
 		network.shutdown();
 	}
@@ -306,14 +278,14 @@ public class NetworkEnvironmentTest {
 			final ResultPartitionType partitionType, final int channels) {
 		return new ResultPartition(
 			"TestTask-" + partitionType + ":" + channels,
-			mock(TaskActions.class),
+			new NoOpTaskActions(),
 			new JobID(),
 			new ResultPartitionID(),
 			partitionType,
 			channels,
 			channels,
 			mock(ResultPartitionManager.class),
-			mock(ResultPartitionConsumableNotifier.class),
+			new NoOpResultPartitionConsumableNotifier(),
 			mock(IOManager.class),
 			false);
 	}
@@ -324,23 +296,13 @@ public class NetworkEnvironmentTest {
 	 *
 	 * @param partitionType
 	 * 		the consumed partition type
-	 * @param channels
+	 * @param numberOfChannels
 	 * 		the number of input channels
 	 *
 	 * @return input gate with some fake settings
 	 */
-	private SingleInputGate createSingleInputGate(
-			final ResultPartitionType partitionType, final int channels) {
-		return spy(new SingleInputGate(
-			"Test Task Name",
-			new JobID(),
-			new IntermediateDataSetID(),
-			partitionType,
-			0,
-			channels,
-			mock(TaskActions.class),
-			UnregisteredMetricGroups.createUnregisteredTaskMetricGroup().getIOMetricGroup(),
-			enableCreditBasedFlowControl));
+	private SingleInputGate createSingleInputGate(ResultPartitionType partitionType, int numberOfChannels) {
+		return spy(InputChannelTestUtils.createSingleInputGate(numberOfChannels, partitionType, enableCreditBasedFlowControl));
 	}
 
 	private static void createRemoteInputChannel(
@@ -356,7 +318,7 @@ public class NetworkEnvironmentTest {
 			connManager,
 			0,
 			0,
-			UnregisteredMetricGroups.createUnregisteredTaskMetricGroup().getIOMetricGroup());
+			InputChannelTestUtils.newUnregisteredInputChannelMetrics());
 		inputGate.setInputChannel(resultPartition.getPartitionId().getPartitionId(), channel);
 	}
 }

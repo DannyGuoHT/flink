@@ -24,6 +24,7 @@ import org.apache.flink.core.fs.FileStatus;
 import org.apache.flink.core.fs.FileSystem;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.mesos.configuration.MesosOptions;
+import org.apache.flink.runtime.io.network.netty.SSLHandlerFactory;
 import org.apache.flink.runtime.net.SSLUtils;
 import org.apache.flink.runtime.rest.handler.router.RoutedRequest;
 import org.apache.flink.runtime.rest.handler.router.Router;
@@ -50,16 +51,12 @@ import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponse;
 import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseStatus;
 import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpServerCodec;
 import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.LastHttpContent;
-import org.apache.flink.shaded.netty4.io.netty.handler.ssl.SslHandler;
 import org.apache.flink.shaded.netty4.io.netty.handler.stream.ChunkedStream;
 import org.apache.flink.shaded.netty4.io.netty.handler.stream.ChunkedWriteHandler;
 import org.apache.flink.shaded.netty4.io.netty.util.CharsetUtil;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLEngine;
 
 import java.io.File;
 import java.io.IOException;
@@ -104,8 +101,6 @@ public class MesosArtifactServer implements MesosArtifactResolver {
 
 	private final Map<Path, URL> paths = new HashMap<>();
 
-	private final SSLContext serverSSLContext;
-
 	public MesosArtifactServer(String prefix, String serverHostname, int configuredPort, Configuration config)
 		throws Exception {
 		if (configuredPort < 0 || configuredPort > 0xFFFF) {
@@ -113,19 +108,20 @@ public class MesosArtifactServer implements MesosArtifactResolver {
 		}
 
 		// Config to enable https access to the artifact server
-		boolean enableSSL = config.getBoolean(
+		final boolean enableSSL = config.getBoolean(
 				MesosOptions.ARTIFACT_SERVER_SSL_ENABLED) &&
-				SSLUtils.getSSLEnabled(config);
+				SSLUtils.isRestSSLEnabled(config);
 
+		final SSLHandlerFactory sslFactory;
 		if (enableSSL) {
 			LOG.info("Enabling ssl for the artifact server");
 			try {
-				serverSSLContext = SSLUtils.createSSLServerContext(config);
+				sslFactory = SSLUtils.createRestServerSSLEngineFactory(config);
 			} catch (Exception e) {
 				throw new IOException("Failed to initialize SSLContext for the artifact server", e);
 			}
 		} else {
-			serverSSLContext = null;
+			sslFactory = null;
 		}
 
 		router = new Router();
@@ -138,11 +134,8 @@ public class MesosArtifactServer implements MesosArtifactResolver {
 				RouterHandler handler = new RouterHandler(router, new HashMap<>());
 
 				// SSL should be the first handler in the pipeline
-				if (serverSSLContext != null) {
-					SSLEngine sslEngine = serverSSLContext.createSSLEngine();
-					SSLUtils.setSSLVerAndCipherSuites(sslEngine, sslConfig);
-					sslEngine.setUseClientMode(false);
-					ch.pipeline().addLast("ssl", new SslHandler(sslEngine));
+				if (sslFactory != null) {
+					ch.pipeline().addLast("ssl", sslFactory.createNettySSLHandler());
 				}
 
 				ch.pipeline()
@@ -169,7 +162,7 @@ public class MesosArtifactServer implements MesosArtifactResolver {
 		String address = bindAddress.getAddress().getHostAddress();
 		int port = bindAddress.getPort();
 
-		String httpProtocol = (serverSSLContext != null) ? "https" : "http";
+		String httpProtocol = (sslFactory != null) ? "https" : "http";
 
 		baseURL = new URL(httpProtocol, serverHostname, port, "/" + prefix + "/");
 

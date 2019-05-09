@@ -53,8 +53,7 @@ import org.apache.flink.streaming.util.KeyedOneInputStreamOperatorTestHarness;
 import org.apache.flink.streaming.util.OneInputStreamOperatorTestHarness;
 import org.apache.flink.streaming.util.OperatorSnapshotUtil;
 import org.apache.flink.streaming.util.TestHarnessUtil;
-import org.apache.flink.streaming.util.migration.MigrationTestUtil;
-import org.apache.flink.streaming.util.migration.MigrationVersion;
+import org.apache.flink.testutils.migration.MigrationVersion;
 import org.apache.flink.util.Collector;
 
 import org.junit.Ignore;
@@ -86,7 +85,13 @@ public class WindowOperatorMigrationTest {
 
 	@Parameterized.Parameters(name = "Migration Savepoint: {0}")
 	public static Collection<MigrationVersion> parameters () {
-		return Arrays.asList(MigrationVersion.v1_2, MigrationVersion.v1_3, MigrationVersion.v1_4);
+		return Arrays.asList(
+			MigrationVersion.v1_2,
+			MigrationVersion.v1_3,
+			MigrationVersion.v1_4,
+			MigrationVersion.v1_5,
+			MigrationVersion.v1_6,
+			MigrationVersion.v1_7);
 	}
 
 	private static final TypeInformation<Tuple2<String, Integer>> STRING_INT_TUPLE =
@@ -95,6 +100,7 @@ public class WindowOperatorMigrationTest {
 	/**
 	 * TODO change this to the corresponding savepoint version to be written (e.g. {@link MigrationVersion#v1_3} for 1.3)
 	 * TODO and remove all @Ignore annotations on write*Snapshot() methods to generate savepoints
+	 * TODO Note: You should generate the savepoint based on the release branch instead of the master.
 	 */
 	private final MigrationVersion flinkGenerateSavepointVersion = null;
 
@@ -177,11 +183,9 @@ public class WindowOperatorMigrationTest {
 
 		testHarness.setup();
 
-		MigrationTestUtil.restoreFromSnapshot(
-			testHarness,
+		testHarness.initializeState(
 			OperatorSnapshotUtil.getResourceFilename(
-				"win-op-migration-test-session-with-stateful-trigger-flink" + testMigrateVersion + "-snapshot"),
-			testMigrateVersion);
+				"win-op-migration-test-session-with-stateful-trigger-flink" + testMigrateVersion + "-snapshot"));
 
 		testHarness.open();
 
@@ -271,11 +275,9 @@ public class WindowOperatorMigrationTest {
 
 		testHarness.setup();
 
-		MigrationTestUtil.restoreFromSnapshot(
-			testHarness,
+		testHarness.initializeState(
 			OperatorSnapshotUtil.getResourceFilename(
-				"win-op-migration-test-session-with-stateful-trigger-mint-flink" + testMigrateVersion + "-snapshot"),
-			testMigrateVersion);
+				"win-op-migration-test-session-with-stateful-trigger-mint-flink" + testMigrateVersion + "-snapshot"));
 
 		testHarness.open();
 
@@ -395,11 +397,9 @@ public class WindowOperatorMigrationTest {
 
 		testHarness.setup();
 
-		MigrationTestUtil.restoreFromSnapshot(
-			testHarness,
+		testHarness.initializeState(
 			OperatorSnapshotUtil.getResourceFilename(
-				"win-op-migration-test-reduce-event-time-flink" + testMigrateVersion + "-snapshot"),
-			testMigrateVersion);
+				"win-op-migration-test-reduce-event-time-flink" + testMigrateVersion + "-snapshot"));
 
 		testHarness.open();
 
@@ -506,11 +506,9 @@ public class WindowOperatorMigrationTest {
 
 		testHarness.setup();
 
-		MigrationTestUtil.restoreFromSnapshot(
-			testHarness,
+		testHarness.initializeState(
 			OperatorSnapshotUtil.getResourceFilename(
-				"win-op-migration-test-apply-event-time-flink" + testMigrateVersion + "-snapshot"),
-			testMigrateVersion);
+				"win-op-migration-test-apply-event-time-flink" + testMigrateVersion + "-snapshot"));
 
 		testHarness.open();
 
@@ -613,11 +611,9 @@ public class WindowOperatorMigrationTest {
 
 		testHarness.setup();
 
-		MigrationTestUtil.restoreFromSnapshot(
-			testHarness,
+		testHarness.initializeState(
 			OperatorSnapshotUtil.getResourceFilename(
-				"win-op-migration-test-reduce-processing-time-flink" + testMigrateVersion + "-snapshot"),
-			testMigrateVersion);
+				"win-op-migration-test-reduce-processing-time-flink" + testMigrateVersion + "-snapshot"));
 
 		testHarness.open();
 
@@ -712,11 +708,9 @@ public class WindowOperatorMigrationTest {
 
 		testHarness.setup();
 
-		MigrationTestUtil.restoreFromSnapshot(
-			testHarness,
+		testHarness.initializeState(
 			OperatorSnapshotUtil.getResourceFilename(
-				"win-op-migration-test-apply-processing-time-flink" + testMigrateVersion + "-snapshot"),
-			testMigrateVersion);
+				"win-op-migration-test-apply-processing-time-flink" + testMigrateVersion + "-snapshot"));
 
 		testHarness.open();
 
@@ -830,11 +824,9 @@ public class WindowOperatorMigrationTest {
 
 		testHarness.setup();
 
-		MigrationTestUtil.restoreFromSnapshot(
-			testHarness,
+		testHarness.initializeState(
 			OperatorSnapshotUtil.getResourceFilename(
-				"win-op-migration-test-kryo-serialized-key-flink" + testMigrateVersion + "-snapshot"),
-			testMigrateVersion);
+				"win-op-migration-test-kryo-serialized-key-flink" + testMigrateVersion + "-snapshot"));
 
 		testHarness.open();
 

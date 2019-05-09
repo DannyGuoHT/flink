@@ -28,7 +28,6 @@ import org.apache.flink.runtime.history.FsJobArchivist;
 import org.apache.flink.runtime.jobgraph.JobStatus;
 import org.apache.flink.runtime.messages.webmonitor.JobDetails;
 import org.apache.flink.runtime.messages.webmonitor.MultipleJobsDetails;
-import org.apache.flink.runtime.rest.handler.legacy.JobsOverviewHandler;
 import org.apache.flink.runtime.rest.messages.JobsOverviewHeaders;
 import org.apache.flink.runtime.util.ExecutorThreadFactory;
 import org.apache.flink.util.FileUtils;
@@ -66,7 +65,7 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
  * {@link HistoryServerOptions#HISTORY_SERVER_ARCHIVE_DIRS}. The directories are polled in regular intervals, defined
  * by {@link HistoryServerOptions#HISTORY_SERVER_ARCHIVE_REFRESH_INTERVAL}.
  *
- * <p>The archives are downloaded and expanded into a file structure analog to the REST API defined in the WebRuntimeMonitor.
+ * <p>The archives are downloaded and expanded into a file structure analog to the REST API.
  */
 class HistoryServerArchiveFetcher {
 
@@ -249,7 +248,23 @@ class HistoryServerArchiveFetcher {
 
 		JsonNode tasks = job.get("tasks");
 		int numTasks = tasks.get("total").asInt();
-		int pending = tasks.get("pending").asInt();
+		JsonNode pendingNode = tasks.get("pending");
+		// for flink version < 1.4 we have pending field,
+		// when version >= 1.4 pending has been split into scheduled, deploying, and created.
+		boolean versionLessThan14 = pendingNode != null;
+		int created = 0;
+		int scheduled;
+		int deploying = 0;
+
+		if (versionLessThan14) {
+			// pending is a mix of CREATED/SCHEDULED/DEPLOYING
+			// to maintain the correct number of task states we pick SCHEDULED
+			scheduled = pendingNode.asInt();
+		} else {
+			created = tasks.get("created").asInt();
+			scheduled = tasks.get("scheduled").asInt();
+			deploying = tasks.get("deploying").asInt();
+		}
 		int running = tasks.get("running").asInt();
 		int finished = tasks.get("finished").asInt();
 		int canceling = tasks.get("canceling").asInt();
@@ -257,9 +272,9 @@ class HistoryServerArchiveFetcher {
 		int failed = tasks.get("failed").asInt();
 
 		int[] tasksPerState = new int[ExecutionState.values().length];
-		// pending is a mix of CREATED/SCHEDULED/DEPLOYING
-		// to maintain the correct number of task states we have to pick one of them
-		tasksPerState[ExecutionState.SCHEDULED.ordinal()] = pending;
+		tasksPerState[ExecutionState.CREATED.ordinal()] = created;
+		tasksPerState[ExecutionState.SCHEDULED.ordinal()] = scheduled;
+		tasksPerState[ExecutionState.DEPLOYING.ordinal()] = deploying;
 		tasksPerState[ExecutionState.RUNNING.ordinal()] = running;
 		tasksPerState[ExecutionState.FINISHED.ordinal()] = finished;
 		tasksPerState[ExecutionState.CANCELING.ordinal()] = canceling;
@@ -275,7 +290,7 @@ class HistoryServerArchiveFetcher {
 	}
 
 	/**
-	 * This method replicates the JSON response that would be given by the {@link JobsOverviewHandler} when
+	 * This method replicates the JSON response that would be given by the JobsOverviewHandler when
 	 * listing both running and finished jobs.
 	 *
 	 * <p>Every job archive contains a joboverview.json file containing the same structure. Since jobs are archived on

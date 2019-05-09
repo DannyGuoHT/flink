@@ -18,7 +18,9 @@
 
 package org.apache.flink.runtime.testutils;
 
+import org.apache.flink.api.common.time.Deadline;
 import org.apache.flink.util.FileUtils;
+import org.apache.flink.util.function.SupplierWithException;
 
 import java.io.BufferedInputStream;
 import java.io.File;
@@ -29,12 +31,14 @@ import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.lang.management.ManagementFactory;
 import java.lang.management.RuntimeMXBean;
-import java.util.UUID;
+import java.util.concurrent.TimeoutException;
 
 /**
  * This class contains auxiliary methods for unit tests.
  */
 public class CommonTestUtils {
+
+	private static final long RETRY_INTERVAL = 100L;
 
 	/**
 	 * Sleeps for a given set of milliseconds, uninterruptibly. If interrupt is called,
@@ -150,17 +154,18 @@ public class CommonTestUtils {
 		}
 	}
 
-	public static File createTempDirectory() throws IOException {
-		File tempDir = new File(System.getProperty("java.io.tmpdir"));
+	public static void waitUntilCondition(SupplierWithException<Boolean, Exception> condition, Deadline timeout) throws Exception {
+		waitUntilCondition(condition, timeout, RETRY_INTERVAL);
+	}
 
-		for (int i = 0; i < 10; i++) {
-			File dir = new File(tempDir, UUID.randomUUID().toString());
-			if (!dir.exists() && dir.mkdirs()) {
-				return dir;
-			}
+	public static void waitUntilCondition(SupplierWithException<Boolean, Exception> condition, Deadline timeout, long retryIntervalMillis) throws Exception {
+		while (timeout.hasTimeLeft() && !condition.get()) {
+			Thread.sleep(Math.min(retryIntervalMillis, timeout.timeLeft().toMillis()));
 		}
 
-		throw new IOException("Could not create temporary file directory");
+		if (!timeout.hasTimeLeft()) {
+			throw new TimeoutException("Condition was not met in given timeout.");
+		}
 	}
 
 	/**
