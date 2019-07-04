@@ -19,7 +19,7 @@ package org.apache.flink.table.plan.util
 
 import org.apache.flink.table.CalcitePair
 import org.apache.flink.table.api.TableException
-import org.apache.flink.table.calcite.FlinkRelBuilder.NamedWindowProperty
+import org.apache.flink.table.calcite.FlinkRelBuilder.PlannerNamedWindowProperty
 import org.apache.flink.table.functions.aggfunctions.DeclarativeAggregateFunction
 import org.apache.flink.table.functions.utils.TableSqlFunction
 import org.apache.flink.table.functions.{AggregateFunction, UserDefinedFunction}
@@ -176,7 +176,7 @@ object RelExplainUtil {
               offset = offset + 1
               argList
             case daf: DeclarativeAggregateFunction =>
-              val aggBufferTypes = daf.getAggBufferTypes
+              val aggBufferTypes = daf.getAggBufferTypes.map(_.getLogicalType)
               val argList = aggBufferTypes.indices.map(offset + _).toList
               offset = offset + aggBufferTypes.length
               argList
@@ -215,7 +215,7 @@ object RelExplainUtil {
             offset = offset + 1
             name
           case daf: DeclarativeAggregateFunction =>
-            val aggBufferTypes = daf.getAggBufferTypes
+            val aggBufferTypes = daf.getAggBufferTypes.map(_.getLogicalType)
             val name = aggBufferTypes.indices
               .map(i => outputFieldNames(offset + i))
               .mkString(", ")
@@ -411,7 +411,7 @@ object RelExplainUtil {
           offset = offset + 1
           name
         case daf: DeclarativeAggregateFunction =>
-          val aggBufferTypes = daf.getAggBufferTypes
+          val aggBufferTypes = daf.getAggBufferTypes.map(_.getLogicalType)
           val name = aggBufferTypes.indices
             .map(i => accNames(offset + i))
             .mkString(", ")
@@ -586,6 +586,20 @@ object RelExplainUtil {
       }
     }select: ($selectionStr)"
     s"Calc($name)"
+  }
+
+  def conditionToString(
+      calcProgram: RexProgram,
+      f: (RexNode, List[String], Option[List[RexNode]]) => String): String = {
+    val cond = calcProgram.getCondition
+    val inputFieldNames = calcProgram.getInputRowType.getFieldNames.toList
+    val localExprs = calcProgram.getExprList.toList
+
+    if (cond != null) {
+      f(cond, inputFieldNames, Some(localExprs))
+    } else {
+      ""
+    }
   }
 
   def selectionToString(
@@ -767,7 +781,7 @@ object RelExplainUtil {
       grouping: Array[Int],
       rowType: RelDataType,
       aggs: Seq[AggregateCall],
-      namedProperties: Seq[NamedWindowProperty],
+      namedProperties: Seq[PlannerNamedWindowProperty],
       withOutputFieldNames: Boolean = true): String = {
     val inFields = inputType.getFieldNames
     val outFields = rowType.getFieldNames

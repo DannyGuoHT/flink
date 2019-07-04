@@ -18,16 +18,20 @@
 
 package org.apache.flink.table.codegen
 
+import org.apache.flink.configuration.Configuration
 import org.apache.flink.metrics.Gauge
-import org.apache.flink.table.`type`.{DateType, InternalType, InternalTypes, RowType, TimestampType}
 import org.apache.flink.table.api.TableConfig
-import org.apache.flink.table.codegen.CodeGenUtils.{BASE_ROW, BINARY_ROW, baseRowFieldReadAccess, newName}
+import org.apache.flink.table.codegen.CodeGenUtils.{BASE_ROW, BINARY_ROW, baseRowFieldReadAccess, className, newName}
 import org.apache.flink.table.codegen.OperatorCodeGenerator.generateCollect
+import org.apache.flink.table.codegen.CodeGenUtils.{BASE_ROW, BINARY_ROW, baseRowFieldReadAccess, newName}
+import org.apache.flink.table.codegen.OperatorCodeGenerator.{INPUT_SELECTION, generateCollect}
 import org.apache.flink.table.dataformat.{BaseRow, JoinedRow}
 import org.apache.flink.table.generated.{GeneratedJoinCondition, GeneratedProjection}
-import org.apache.flink.table.runtime.TwoInputOperatorWrapper
+import org.apache.flink.table.runtime.CodeGenOperatorFactory
 import org.apache.flink.table.runtime.hashtable.{LongHashPartition, LongHybridHashTable}
 import org.apache.flink.table.runtime.join.HashJoinType
+import org.apache.flink.table.types.logical.LogicalTypeRoot._
+import org.apache.flink.table.types.logical._
 import org.apache.flink.table.typeutils.BinaryRowSerializer
 
 /**
@@ -44,11 +48,12 @@ object LongHashJoinGenerator {
         joinType == HashJoinType.ANTI ||
         joinType == HashJoinType.PROBE_OUTER) &&
         filterNulls.forall(b => b) &&
-        keyType.getFieldTypes.length == 1 && {
-      val t = keyType.getTypeAt(0)
-      t == InternalTypes.LONG || t == InternalTypes.INT || t == InternalTypes.SHORT ||
-          t == InternalTypes.BYTE || t == InternalTypes.FLOAT || t == InternalTypes.DOUBLE ||
-          t.isInstanceOf[DateType] || t.isInstanceOf[TimestampType] || t == InternalTypes.TIME
+        keyType.getFieldCount == 1 && {
+      keyType.getTypeAt(0).getTypeRoot match {
+        case BIGINT | INTEGER | SMALLINT | TINYINT | FLOAT | DOUBLE | DATE |
+             TIME_WITHOUT_TIME_ZONE | TIMESTAMP_WITHOUT_TIME_ZONE => true
+        case _ => false
+      }
       // TODO decimal and multiKeys support.
       // TODO All HashJoinType support.
     }
@@ -59,11 +64,11 @@ object LongHashJoinGenerator {
       keyType: RowType,
       keyMapping: Array[Int],
       rowTerm: String): String = {
-    val singleType = keyType.getFieldTypes()(0)
+    val singleType = keyType.getTypeAt(0)
     val getCode = baseRowFieldReadAccess(ctx, keyMapping(0), rowTerm, singleType)
-    val term = singleType match {
-      case InternalTypes.FLOAT => s"Float.floatToIntBits($getCode)"
-      case InternalTypes.DOUBLE => s"Double.doubleToLongBits($getCode)"
+    val term = singleType.getTypeRoot match {
+      case FLOAT => s"Float.floatToIntBits($getCode)"
+      case DOUBLE => s"Double.doubleToLongBits($getCode)"
       case _ => getCode
     }
     s"return $term;"
@@ -81,8 +86,8 @@ object LongHashJoinGenerator {
      """.stripMargin, anyNullTerm)
   }
 
-  def genProjection(conf: TableConfig, types: Array[InternalType]): GeneratedProjection = {
-    val rowType = new RowType(types: _*)
+  def genProjection(conf: TableConfig, types: Array[LogicalType]): GeneratedProjection = {
+    val rowType = RowType.of(types: _*)
     ProjectionCodeGenerator.generateProjection(
       CodeGeneratorContext.apply(conf),
       "Projection",
@@ -100,24 +105,24 @@ object LongHashJoinGenerator {
       buildKeyMapping: Array[Int],
       probeKeyMapping: Array[Int],
       managedMemorySize: Long,
-      preferredMemorySize: Long,
+      maxMemorySize: Long,
       perRequestSize: Long,
       buildRowSize: Int,
       buildRowCount: Long,
       reverseJoinFunction: Boolean,
-      condFunc: GeneratedJoinCondition): TwoInputOperatorWrapper[BaseRow, BaseRow, BaseRow] = {
+      condFunc: GeneratedJoinCondition): CodeGenOperatorFactory[BaseRow] = {
 
-    val buildSer = new BinaryRowSerializer(buildType.getArity)
-    val probeSer = new BinaryRowSerializer(probeType.getArity)
+    val buildSer = new BinaryRowSerializer(buildType.getFieldCount)
+    val probeSer = new BinaryRowSerializer(probeType.getFieldCount)
 
     val tableTerm = newName("LongHashTable")
     val ctx = CodeGeneratorContext(conf)
     val buildSerTerm = ctx.addReusableObject(buildSer, "buildSer")
     val probeSerTerm = ctx.addReusableObject(probeSer, "probeSer")
 
-    val bGenProj = genProjection(conf, buildType.getFieldTypes)
+    val bGenProj = genProjection(conf, buildType.getChildren.toArray(Array[LogicalType]()))
     ctx.addReusableInnerClass(bGenProj.getClassName, bGenProj.getCode)
-    val pGenProj = genProjection(conf, probeType.getFieldTypes)
+    val pGenProj = genProjection(conf, probeType.getChildren.toArray(Array[LogicalType]()))
     ctx.addReusableInnerClass(pGenProj.getClassName, pGenProj.getCode)
     ctx.addReusableInnerClass(condFunc.getClassName, condFunc.getCode)
 
@@ -134,6 +139,9 @@ object LongHashJoinGenerator {
     ctx.addReusableMember(s"${condFunc.getClassName} condFunc;")
     val condRefs = ctx.addReusableObject(condFunc.getReferences, "condRefs")
     ctx.addReusableInitStatement(s"condFunc = new ${condFunc.getClassName}($condRefs);")
+    ctx.addReusableOpenStatement(s"condFunc.setRuntimeContext(getRuntimeContext());")
+    ctx.addReusableOpenStatement(s"condFunc.open(new ${className[Configuration]}());")
+    ctx.addReusableCloseStatement(s"condFunc.close();")
 
     val gauge = classOf[Gauge[_]].getCanonicalName
     ctx.addReusableOpenStatement(
@@ -166,7 +174,7 @@ object LongHashJoinGenerator {
          |    super(getContainingTask().getJobConfiguration(), getContainingTask(),
          |      $buildSerTerm, $probeSerTerm,
          |      getContainingTask().getEnvironment().getMemoryManager(),
-         |      ${managedMemorySize}L, ${preferredMemorySize}L, ${perRequestSize}L,
+         |      ${managedMemorySize}L, ${maxMemorySize}L, ${perRequestSize}L,
          |      getContainingTask().getEnvironment().getIOManager(),
          |      $buildRowSize,
          |      ${buildRowCount}L / getRuntimeContext().getNumberOfParallelSubtasks());
@@ -195,7 +203,7 @@ object LongHashJoinGenerator {
     ctx.addReusableInnerClass(tableTerm, tableCode)
 
     ctx.addReusableNullRow("buildSideNullRow", buildSer.getArity)
-    ctx.addReusableOutputRecord(new RowType(), classOf[JoinedRow], "joinedRow")
+    ctx.addReusableOutputRecord(RowType.of(), classOf[JoinedRow], "joinedRow")
     ctx.addReusableMember(s"$tableTerm table;")
     ctx.addReusableOpenStatement(s"table = new $tableTerm();")
 
@@ -301,6 +309,9 @@ object LongHashJoinGenerator {
          |}
        """.stripMargin)
 
+    val buildEnd = newName("buildEnd")
+    ctx.addReusableMember(s"private transient boolean $buildEnd = false;")
+
     val genOp = OperatorCodeGenerator.generateTwoInputStreamOperator[BaseRow, BaseRow, BaseRow](
       ctx,
       "LongHashJoinOperator",
@@ -315,6 +326,7 @@ object LongHashJoinGenerator {
       s"""
          |LOG.info("Finish build phase.");
          |table.endBuild();
+         |$buildEnd = true;
        """.stripMargin,
       s"""
          |$BASE_ROW row = ($BASE_ROW) element.getValue();
@@ -333,9 +345,16 @@ object LongHashJoinGenerator {
          |}
          |LOG.info("Finish rebuild phase.");
        """.stripMargin,
+      s"""
+         |if ($buildEnd) {
+         |  return $INPUT_SELECTION.SECOND;
+         |} else {
+         |  return $INPUT_SELECTION.FIRST;
+         |}
+       """.stripMargin,
       buildType,
       probeType)
 
-    new TwoInputOperatorWrapper[BaseRow, BaseRow, BaseRow](genOp)
+    new CodeGenOperatorFactory[BaseRow](genOp)
   }
 }

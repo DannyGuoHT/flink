@@ -19,32 +19,55 @@
 package org.apache.flink.table.plan.nodes.physical.batch
 
 import org.apache.flink.runtime.operators.DamBehavior
-import org.apache.flink.streaming.api.transformations.StreamTransformation
 import org.apache.flink.table.api.{BatchTableEnvironment, TableException}
 import org.apache.flink.table.dataformat.BaseRow
 import org.apache.flink.table.plan.cost.{FlinkCost, FlinkCostFactory}
 import org.apache.flink.table.plan.nodes.exec.ExecNode
 import org.apache.flink.table.typeutils.BinaryRowSerializer
-
 import org.apache.calcite.plan._
 import org.apache.calcite.rel.core._
 import org.apache.calcite.rel.metadata.RelMetadataQuery
 import org.apache.calcite.rel.{RelNode, RelWriter}
 import org.apache.calcite.rex.RexNode
-
 import java.util
+
+import org.apache.flink.api.dag.Transformation
 
 import scala.collection.JavaConversions._
 
 /**
   * Batch physical RelNode for nested-loop [[Join]].
   */
-trait BatchExecNestedLoopJoinBase extends BatchExecJoinBase {
+class BatchExecNestedLoopJoin(
+    cluster: RelOptCluster,
+    traitSet: RelTraitSet,
+    leftRel: RelNode,
+    rightRel: RelNode,
+    condition: RexNode,
+    joinType: JoinRelType,
+    // true if LHS is build side, else RHS is build side
+    val leftIsBuild: Boolean,
+    // true if one side returns single row, else false
+    val singleRowJoin: Boolean)
+  extends BatchExecJoinBase(cluster, traitSet, leftRel, rightRel, condition, joinType) {
 
-  // true if LHS is build side, else RHS is build side
-  val leftIsBuild: Boolean
-  // true if one side returns single row, else false
-  val singleRowJoin: Boolean
+  override def copy(
+      traitSet: RelTraitSet,
+      conditionExpr: RexNode,
+      left: RelNode,
+      right: RelNode,
+      joinType: JoinRelType,
+      semiJoinDone: Boolean): Join = {
+    new BatchExecNestedLoopJoin(
+      cluster,
+      traitSet,
+      left,
+      right,
+      conditionExpr,
+      joinType,
+      leftIsBuild,
+      singleRowJoin)
+  }
 
   override def explainTerms(pw: RelWriter): RelWriter = {
     super.explainTerms(pw)
@@ -58,6 +81,7 @@ trait BatchExecNestedLoopJoinBase extends BatchExecJoinBase {
     if (leftRowCnt == null || rightRowCnt == null) {
       return null
     }
+
     val buildRel = if (leftIsBuild) getLeft else getRight
     val buildRows = mq.getRowCount(buildRel)
     val buildRowSize = mq.getAverageRowSize(buildRel)
@@ -80,6 +104,11 @@ trait BatchExecNestedLoopJoinBase extends BatchExecJoinBase {
     }
   }
 
+  override def satisfyTraits(requiredTraitSet: RelTraitSet): Option[RelNode] = {
+    // Assume NestedLoopJoin always broadcast data from child which smaller.
+    satisfyTraitsOnBroadcastJoin(requiredTraitSet, leftIsBuild)
+  }
+
   //~ ExecNode methods -----------------------------------------------------------
 
   override def getDamBehavior: DamBehavior = DamBehavior.PIPELINED
@@ -94,39 +123,8 @@ trait BatchExecNestedLoopJoinBase extends BatchExecJoinBase {
   }
 
   override def translateToPlanInternal(
-      tableEnv: BatchTableEnvironment): StreamTransformation[BaseRow] = {
+      tableEnv: BatchTableEnvironment): Transformation[BaseRow] = {
     throw new TableException("Implements this")
   }
 
 }
-
-class BatchExecNestedLoopJoin(
-    cluster: RelOptCluster,
-    traitSet: RelTraitSet,
-    leftRel: RelNode,
-    rightRel: RelNode,
-    condition: RexNode,
-    joinType: JoinRelType,
-    val leftIsBuild: Boolean,
-    val singleRowJoin: Boolean)
-  extends Join(cluster, traitSet, leftRel, rightRel, condition, Set.empty[CorrelationId], joinType)
-  with BatchExecNestedLoopJoinBase {
-
-  override def copy(
-      traitSet: RelTraitSet,
-      conditionExpr: RexNode,
-      left: RelNode,
-      right: RelNode,
-      joinType: JoinRelType,
-      semiJoinDone: Boolean): Join =
-    new BatchExecNestedLoopJoin(
-      cluster,
-      traitSet,
-      left,
-      right,
-      conditionExpr,
-      joinType,
-      leftIsBuild,
-      singleRowJoin)
-}
-

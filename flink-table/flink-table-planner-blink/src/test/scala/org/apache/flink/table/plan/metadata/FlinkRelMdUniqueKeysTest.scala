@@ -21,7 +21,7 @@ package org.apache.flink.table.plan.metadata
 import org.apache.flink.table.plan.nodes.calcite.LogicalExpand
 import org.apache.flink.table.plan.util.ExpandUtil
 
-import com.google.common.collect.ImmutableList
+import com.google.common.collect.{ImmutableList, ImmutableSet}
 import org.apache.calcite.sql.fun.SqlStdOperatorTable.{EQUALS, LESS_THAN}
 import org.apache.calcite.util.ImmutableBitSet
 import org.junit.Assert._
@@ -169,12 +169,32 @@ class FlinkRelMdUniqueKeysTest extends FlinkRelMdHandlerTestBase {
   }
 
   @Test
-  def testGetUniqueKeysOnOverWindow(): Unit = {
-    Array(flinkLogicalOverWindow, batchOverWindowAgg).foreach { agg =>
+  def testGetUniqueKeysOnWindowAgg(): Unit = {
+    Array(logicalWindowAgg, flinkLogicalWindowAgg, batchGlobalWindowAggWithoutLocalAgg,
+      batchGlobalWindowAggWithLocalAgg).foreach { agg =>
+      assertEquals(ImmutableSet.of(ImmutableBitSet.of(0, 1, 3), ImmutableBitSet.of(0, 1, 4),
+        ImmutableBitSet.of(0, 1, 5), ImmutableBitSet.of(0, 1, 6)),
+        mq.getUniqueKeys(agg))
+    }
+    assertNull(mq.getUniqueKeys(batchLocalWindowAgg))
+
+    Array(logicalWindowAggWithAuxGroup, flinkLogicalWindowAggWithAuxGroup,
+      batchGlobalWindowAggWithoutLocalAggWithAuxGroup,
+      batchGlobalWindowAggWithLocalAggWithAuxGroup).foreach { agg =>
+      assertEquals(ImmutableSet.of(ImmutableBitSet.of(0, 3), ImmutableBitSet.of(0, 4),
+        ImmutableBitSet.of(0, 5), ImmutableBitSet.of(0, 6)),
+        mq.getUniqueKeys(agg))
+    }
+    assertNull(mq.getUniqueKeys(batchLocalWindowAggWithAuxGroup))
+  }
+
+  @Test
+  def testGetUniqueKeysOnOverAgg(): Unit = {
+    Array(flinkLogicalOverAgg, batchOverAgg).foreach { agg =>
       assertEquals(uniqueKeys(Array(0)), mq.getUniqueKeys(agg).toSet)
     }
 
-    assertEquals(uniqueKeys(Array(0)), mq.getUniqueKeys(streamOverWindowAgg).toSet)
+    assertEquals(uniqueKeys(Array(0)), mq.getUniqueKeys(streamOverAgg).toSet)
   }
 
   @Test
@@ -206,6 +226,29 @@ class FlinkRelMdUniqueKeysTest extends FlinkRelMdHandlerTestBase {
     assertEquals(uniqueKeys(), mq.getUniqueKeys(logicalFullJoinOnRHSUniqueKeys).toSet)
     assertEquals(uniqueKeys(), mq.getUniqueKeys(logicalFullJoinWithoutEquiCond).toSet)
     assertEquals(uniqueKeys(), mq.getUniqueKeys(logicalFullJoinWithEquiAndNonEquiCond).toSet)
+
+    assertEquals(uniqueKeys(Array(1)),
+      mq.getUniqueKeys(logicalSemiJoinOnUniqueKeys).toSet)
+    assertEquals(uniqueKeys(Array(1)), mq.getUniqueKeys(logicalSemiJoinNotOnUniqueKeys).toSet)
+    assertNull(mq.getUniqueKeys(logicalSemiJoinOnRHSUniqueKeys))
+    assertEquals(uniqueKeys(Array(1)), mq.getUniqueKeys(logicalSemiJoinWithoutEquiCond).toSet)
+    assertEquals(uniqueKeys(Array(1)),
+      mq.getUniqueKeys(logicalSemiJoinWithEquiAndNonEquiCond).toSet)
+
+    assertEquals(uniqueKeys(Array(1)),
+      mq.getUniqueKeys(logicalAntiJoinOnUniqueKeys).toSet)
+    assertEquals(uniqueKeys(Array(1)), mq.getUniqueKeys(logicalAntiJoinNotOnUniqueKeys).toSet)
+    assertNull(mq.getUniqueKeys(logicalAntiJoinOnRHSUniqueKeys))
+    assertEquals(uniqueKeys(Array(1)), mq.getUniqueKeys(logicalAntiJoinWithoutEquiCond).toSet)
+    assertEquals(uniqueKeys(Array(1)),
+      mq.getUniqueKeys(logicalAntiJoinWithEquiAndNonEquiCond).toSet)
+  }
+
+  @Test
+  def testGetUniqueKeysOnLookupJoin(): Unit = {
+    Array(batchLookupJoin, streamLookupJoin).foreach { join =>
+      assertEquals(uniqueKeys(), mq.getUniqueKeys(join).toSet)
+    }
   }
 
   @Test

@@ -18,11 +18,10 @@
 
 package org.apache.flink.table.codegen.agg.batch
 
-import org.apache.flink.streaming.api.operators.OneInputStreamOperator
-import org.apache.flink.table.`type`.TypeConverters.createInternalTypeFromTypeInfo
-import org.apache.flink.table.`type`.{InternalType, InternalTypes, RowType}
 import org.apache.flink.table.dataformat.BaseRow
-import org.apache.flink.table.runtime.OneInputOperatorWrapper
+import org.apache.flink.table.runtime.CodeGenOperatorFactory
+import org.apache.flink.table.types.TypeInfoLogicalTypeConverter.fromTypeInfoToLogicalType
+import org.apache.flink.table.types.logical.{BigIntType, DoubleType, LogicalType, RowType, VarCharType}
 
 import org.junit.Test
 
@@ -31,12 +30,12 @@ import org.junit.Test
   */
 class SortAggCodeGeneratorTest extends BatchAggTestBase {
 
-  val localOutputType = new RowType(
-    Array[InternalType](
-      InternalTypes.STRING, InternalTypes.STRING,
-      InternalTypes.LONG, InternalTypes.LONG,
-      InternalTypes.DOUBLE, InternalTypes.LONG,
-      createInternalTypeFromTypeInfo(imperativeAggFunc.getAccumulatorType)),
+  val localOutputType = RowType.of(
+    Array[LogicalType](
+      new VarCharType(VarCharType.MAX_LENGTH), new VarCharType(VarCharType.MAX_LENGTH),
+      new BigIntType(), new BigIntType(),
+      new DoubleType(), new BigIntType(),
+      fromTypeInfoToLogicalType(imperativeAggFunc.getAccumulatorType)),
     Array(
       "f0", "f4",
       "agg1Buffer1", "agg1Buffer2",
@@ -93,13 +92,13 @@ class SortAggCodeGeneratorTest extends BatchAggTestBase {
   }
 
   private def getOperatorWithKey(isMerge: Boolean, isFinal: Boolean)
-    : (OneInputStreamOperator[BaseRow, BaseRow], RowType, RowType) = {
-    val localOutputType = new RowType(
-      Array[InternalType](
-        InternalTypes.STRING, InternalTypes.STRING,
-        InternalTypes.LONG, InternalTypes.LONG,
-        InternalTypes.DOUBLE, InternalTypes.LONG,
-        createInternalTypeFromTypeInfo(imperativeAggFunc.getAccumulatorType)),
+    : (CodeGenOperatorFactory[BaseRow], RowType, RowType) = {
+    val localOutputType = RowType.of(
+      Array[LogicalType](
+        new VarCharType(VarCharType.MAX_LENGTH), new VarCharType(VarCharType.MAX_LENGTH),
+        new BigIntType(), new BigIntType(),
+        new DoubleType(), new BigIntType(),
+        fromTypeInfoToLogicalType(imperativeAggFunc.getAccumulatorType)),
       Array(
         "f0", "f4",
         "agg1Buffer1", "agg1Buffer2",
@@ -116,6 +115,6 @@ class SortAggCodeGeneratorTest extends BatchAggTestBase {
     val auxGrouping = if (isMerge) Array(1) else Array(4)
     val genOp = SortAggCodeGenerator.genWithKeys(
       ctx, relBuilder, aggInfoList, iType, oType, Array(0), auxGrouping, isMerge, isFinal)
-    (new OneInputOperatorWrapper[BaseRow, BaseRow](genOp), iType, oType)
+    (new CodeGenOperatorFactory[BaseRow](genOp), iType, oType)
   }
 }

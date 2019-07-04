@@ -18,12 +18,14 @@
 
 package org.apache.flink.table.plan.metadata
 
-import org.apache.flink.table.plan.nodes.calcite.{Expand, Rank}
+import org.apache.flink.table.calcite.FlinkRelBuilder.PlannerNamedWindowProperty
+import org.apache.flink.table.plan.nodes.calcite.{Expand, Rank, WindowAggregate}
+import org.apache.flink.table.plan.nodes.common.CommonLookupJoin
 import org.apache.flink.table.plan.nodes.logical._
 import org.apache.flink.table.plan.nodes.physical.batch._
 import org.apache.flink.table.plan.nodes.physical.stream._
 import org.apache.flink.table.plan.schema.FlinkRelOptTable
-import org.apache.flink.table.plan.util.FlinkRelMdUtil
+import org.apache.flink.table.plan.util.{FlinkRelMdUtil, RankUtil}
 import org.apache.flink.table.runtime.rank.RankType
 import org.apache.flink.table.sources.TableSource
 import org.apache.flink.table.{JArrayList, JBoolean, JHashMap, JHashSet, JList, JSet}
@@ -32,7 +34,7 @@ import com.google.common.collect.ImmutableSet
 import org.apache.calcite.plan.RelOptTable
 import org.apache.calcite.plan.volcano.RelSubset
 import org.apache.calcite.rel.`type`.RelDataType
-import org.apache.calcite.rel.core.{JoinRelType, _}
+import org.apache.calcite.rel.core._
 import org.apache.calcite.rel.metadata._
 import org.apache.calcite.rel.{RelNode, SingleRel}
 import org.apache.calcite.rex.{RexCall, RexInputRef, RexNode}
@@ -47,7 +49,6 @@ import scala.collection.JavaConversions._
 class FlinkRelMdUniqueKeys private extends MetadataHandler[BuiltInMetadata.UniqueKeys] {
 
   def getDef: MetadataDef[BuiltInMetadata.UniqueKeys] = BuiltInMetadata.UniqueKeys.DEF
-
 
   def getUniqueKeys(
       rel: TableScan,
@@ -227,7 +228,7 @@ class FlinkRelMdUniqueKeys private extends MetadataHandler[BuiltInMetadata.Uniqu
       mq: RelMetadataQuery,
       ignoreNulls: Boolean): JSet[ImmutableBitSet] = {
     val inputUniqueKeys = mq.getUniqueKeys(rel.getInput, ignoreNulls)
-    val rankFunColumnIndex = FlinkRelMdUtil.getRankFunctionColumnIndex(rel).getOrElse(-1)
+    val rankFunColumnIndex = RankUtil.getRankNumberColumnIndex(rel).getOrElse(-1)
     if (rankFunColumnIndex < 0) {
       inputUniqueKeys
     } else {
@@ -262,8 +263,7 @@ class FlinkRelMdUniqueKeys private extends MetadataHandler[BuiltInMetadata.Uniqu
       rel: Aggregate,
       mq: RelMetadataQuery,
       ignoreNulls: Boolean): JSet[ImmutableBitSet] = {
-    // group by keys form a unique key
-    ImmutableSet.of(ImmutableBitSet.range(rel.getGroupCount))
+    getUniqueKeysOnAggregate(rel.getGroupSet.toArray, mq, ignoreNulls)
   }
 
   def getUniqueKeys(
@@ -271,8 +271,7 @@ class FlinkRelMdUniqueKeys private extends MetadataHandler[BuiltInMetadata.Uniqu
       mq: RelMetadataQuery,
       ignoreNulls: Boolean): JSet[ImmutableBitSet] = {
     if (rel.isFinal) {
-      // group by keys form a unique key
-      ImmutableSet.of(ImmutableBitSet.of(rel.getGrouping.indices: _*))
+      getUniqueKeysOnAggregate(rel.getGrouping, mq, ignoreNulls)
     } else {
       null
     }
@@ -282,8 +281,7 @@ class FlinkRelMdUniqueKeys private extends MetadataHandler[BuiltInMetadata.Uniqu
       rel: StreamExecGroupAggregate,
       mq: RelMetadataQuery,
       ignoreNulls: Boolean): JSet[ImmutableBitSet] = {
-    // group by keys form a unique key
-    toImmutableSet(rel.grouping.indices.toArray)
+    getUniqueKeysOnAggregate(rel.grouping, mq, ignoreNulls)
   }
 
   def getUniqueKeys(
@@ -291,12 +289,117 @@ class FlinkRelMdUniqueKeys private extends MetadataHandler[BuiltInMetadata.Uniqu
       mq: RelMetadataQuery,
       ignoreNulls: Boolean): JSet[ImmutableBitSet] = null
 
-
   def getUniqueKeys(
       rel: StreamExecGlobalGroupAggregate,
       mq: RelMetadataQuery,
       ignoreNulls: Boolean): JSet[ImmutableBitSet] = {
-    ImmutableSet.of(ImmutableBitSet.of(rel.grouping.indices.toArray: _*))
+    getUniqueKeysOnAggregate(rel.grouping, mq, ignoreNulls)
+  }
+
+  def getUniqueKeysOnAggregate(
+      grouping: Array[Int],
+      mq: RelMetadataQuery,
+      ignoreNulls: Boolean): util.Set[ImmutableBitSet] = {
+    // group by keys form a unique key
+    ImmutableSet.of(ImmutableBitSet.of(grouping.indices: _*))
+  }
+
+  def getUniqueKeys(
+      rel: WindowAggregate,
+      mq: RelMetadataQuery,
+      ignoreNulls: Boolean): util.Set[ImmutableBitSet] = {
+    getUniqueKeysOnWindowAgg(
+      rel.getRowType.getFieldCount,
+      rel.getNamedProperties,
+      rel.getGroupSet.toArray,
+      mq,
+      ignoreNulls)
+  }
+
+  def getUniqueKeys(
+      rel: BatchExecWindowAggregateBase,
+      mq: RelMetadataQuery,
+      ignoreNulls: Boolean): util.Set[ImmutableBitSet] = {
+    if (rel.isFinal) {
+      getUniqueKeysOnWindowAgg(
+        rel.getRowType.getFieldCount,
+        rel.getNamedProperties,
+        rel.getGrouping,
+        mq,
+        ignoreNulls)
+    } else {
+      null
+    }
+  }
+
+  def getUniqueKeys(
+      rel: StreamExecGroupWindowAggregate,
+      mq: RelMetadataQuery,
+      ignoreNulls: Boolean): util.Set[ImmutableBitSet] = {
+    getUniqueKeysOnWindowAgg(
+      rel.getRowType.getFieldCount, rel.getWindowProperties, rel.getGrouping, mq, ignoreNulls)
+  }
+
+  private def getUniqueKeysOnWindowAgg(
+      fieldCount: Int,
+      namedProperties: Seq[PlannerNamedWindowProperty],
+      grouping: Array[Int],
+      mq: RelMetadataQuery,
+      ignoreNulls: Boolean): util.Set[ImmutableBitSet] = {
+    if (namedProperties.nonEmpty) {
+      val begin = fieldCount - namedProperties.size
+      val end = fieldCount - 1
+      //namedProperties's indexes is at the end of output record
+      val keys = ImmutableBitSet.of(grouping.indices: _*)
+      (begin to end).map {
+        i => keys.union(ImmutableBitSet.of(i))
+      }.toSet[ImmutableBitSet]
+    } else {
+      null
+    }
+  }
+
+  def getUniqueKeys(
+      rel: Window,
+      mq: RelMetadataQuery,
+      ignoreNulls: Boolean): JSet[ImmutableBitSet] = {
+    getUniqueKeysOfOverAgg(rel, mq, ignoreNulls)
+  }
+
+  def getUniqueKeys(
+      rel: BatchExecOverAggregate,
+      mq: RelMetadataQuery,
+      ignoreNulls: Boolean): JSet[ImmutableBitSet] = {
+    getUniqueKeysOfOverAgg(rel, mq, ignoreNulls)
+  }
+
+  def getUniqueKeys(
+      rel: StreamExecOverAggregate,
+      mq: RelMetadataQuery,
+      ignoreNulls: Boolean): JSet[ImmutableBitSet] = {
+    getUniqueKeysOfOverAgg(rel, mq, ignoreNulls)
+  }
+
+  private def getUniqueKeysOfOverAgg(
+      window: SingleRel,
+      mq: RelMetadataQuery,
+      ignoreNulls: Boolean): JSet[ImmutableBitSet] = {
+    mq.getUniqueKeys(window.getInput, ignoreNulls)
+  }
+
+  def getUniqueKeys(
+      join: Join,
+      mq: RelMetadataQuery,
+      ignoreNulls: Boolean): JSet[ImmutableBitSet] = {
+    join.getJoinType match {
+      case JoinRelType.SEMI | JoinRelType.ANTI =>
+        // only return the unique keys from the LHS since a SEMI/ANTI join only
+        // returns the LHS
+        mq.getUniqueKeys(join.getLeft, ignoreNulls)
+      case _ =>
+        getJoinUniqueKeys(
+          join.analyzeCondition(), join.getJoinType, join.getLeft, join.getRight, mq, ignoreNulls)
+    }
   }
 
   def getUniqueKeys(
@@ -308,39 +411,18 @@ class FlinkRelMdUniqueKeys private extends MetadataHandler[BuiltInMetadata.Uniqu
   }
 
   def getUniqueKeys(
-      rel: Window,
+      join: CommonLookupJoin,
       mq: RelMetadataQuery,
-      ignoreNulls: Boolean): JSet[ImmutableBitSet] = {
-    getUniqueKeysOfOverWindow(rel, mq, ignoreNulls)
-  }
-
-  def getUniqueKeys(
-      rel: BatchExecOverAggregate,
-      mq: RelMetadataQuery,
-      ignoreNulls: Boolean): JSet[ImmutableBitSet] = {
-    getUniqueKeysOfOverWindow(rel, mq, ignoreNulls)
-  }
-
-  def getUniqueKeys(
-      rel: StreamExecOverAggregate,
-      mq: RelMetadataQuery,
-      ignoreNulls: Boolean): JSet[ImmutableBitSet] = {
-    getUniqueKeysOfOverWindow(rel, mq, ignoreNulls)
-  }
-
-  private def getUniqueKeysOfOverWindow(
-      window: SingleRel,
-      mq: RelMetadataQuery,
-      ignoreNulls: Boolean): JSet[ImmutableBitSet] = {
-    mq.getUniqueKeys(window.getInput, ignoreNulls)
-  }
-
-  def getUniqueKeys(
-      join: Join,
-      mq: RelMetadataQuery,
-      ignoreNulls: Boolean): JSet[ImmutableBitSet] = {
+      ignoreNulls: Boolean): util.Set[ImmutableBitSet] = {
+    val left = join.getInput
+    val leftUniqueKeys = mq.getUniqueKeys(left, ignoreNulls)
+    val leftType = left.getRowType
     getJoinUniqueKeys(
-      join.analyzeCondition(), join.getJoinType, join.getLeft, join.getRight, mq, ignoreNulls)
+      join.joinInfo, join.joinType, leftType, leftUniqueKeys, null,
+      mq.areColumnsUnique(left, join.joinInfo.leftSet, ignoreNulls),
+      // TODO get uniqueKeys from TableSchema of TableSource
+      null,
+      mq)
   }
 
   private def getJoinUniqueKeys(
@@ -420,17 +502,6 @@ class FlinkRelMdUniqueKeys private extends MetadataHandler[BuiltInMetadata.Uniqu
     }
     retSet
   }
-
-  def getUniqueKeys(
-      rel: SemiJoin,
-      mq: RelMetadataQuery,
-      ignoreNulls: Boolean): JSet[ImmutableBitSet] = {
-    // only return the unique keys from the LHS since a semijoin only
-    // returns the LHS
-    mq.getUniqueKeys(rel.getLeft, ignoreNulls)
-  }
-
-  // TODO supports temporal table join
 
   def getUniqueKeys(
       rel: Correlate,

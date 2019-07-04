@@ -18,11 +18,14 @@
 
 package org.apache.flink.table.runtime.join;
 
+import org.apache.flink.api.common.functions.AbstractRichFunction;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.runtime.jobgraph.OperatorID;
+import org.apache.flink.streaming.api.operators.InputSelectable;
 import org.apache.flink.streaming.api.operators.StreamOperator;
+import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
-import org.apache.flink.streaming.runtime.tasks.OperatorChain;
+import org.apache.flink.streaming.runtime.tasks.TwoInputSelectableStreamTask;
 import org.apache.flink.streaming.runtime.tasks.TwoInputStreamTask;
 import org.apache.flink.streaming.runtime.tasks.TwoInputStreamTaskTestHarness;
 import org.apache.flink.table.dataformat.BaseRow;
@@ -33,10 +36,9 @@ import org.apache.flink.table.generated.GeneratedJoinCondition;
 import org.apache.flink.table.generated.GeneratedProjection;
 import org.apache.flink.table.generated.JoinCondition;
 import org.apache.flink.table.generated.Projection;
-import org.apache.flink.table.runtime.TwoInputOperatorWrapper;
 import org.apache.flink.table.runtime.util.UniformBinaryRowGenerator;
-import org.apache.flink.table.type.InternalTypes;
-import org.apache.flink.table.type.RowType;
+import org.apache.flink.table.types.logical.IntType;
+import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.table.typeutils.BaseRowTypeInfo;
 import org.apache.flink.util.MutableObjectIterator;
 
@@ -47,6 +49,7 @@ import java.io.Serializable;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Queue;
+import java.util.Random;
 
 import static java.lang.Long.valueOf;
 
@@ -181,7 +184,7 @@ public class Int2HashJoinOperatorTest implements Serializable {
 		MutableObjectIterator<BinaryRow> probeInput = new UniformBinaryRowGenerator(numKeys2, probeValsPerKey, true);
 
 		HashJoinType type = HashJoinType.SEMI;
-		StreamOperator operator = newOperator(33 * 32 * 1024, type, false);
+		Object operator = newOperator(33 * 32 * 1024, type, false);
 		joinAndAssert(operator, buildInput, probeInput, 90, 9, 45, true);
 	}
 
@@ -196,7 +199,7 @@ public class Int2HashJoinOperatorTest implements Serializable {
 		MutableObjectIterator<BinaryRow> probeInput = new UniformBinaryRowGenerator(numKeys2, probeValsPerKey, true);
 
 		HashJoinType type = HashJoinType.ANTI;
-		StreamOperator operator = newOperator(33 * 32 * 1024, type, false);
+		Object operator = newOperator(33 * 32 * 1024, type, false);
 		joinAndAssert(operator, buildInput, probeInput, 10, 1, 45, true);
 	}
 
@@ -211,7 +214,7 @@ public class Int2HashJoinOperatorTest implements Serializable {
 		MutableObjectIterator<BinaryRow> probeInput = new UniformBinaryRowGenerator(numKeys2, probeValsPerKey, true);
 
 		HashJoinType type = HashJoinType.BUILD_LEFT_SEMI;
-		StreamOperator operator = newOperator(33 * 32 * 1024, type, false);
+		Object operator = newOperator(33 * 32 * 1024, type, false);
 		joinAndAssert(operator, buildInput, probeInput, 90, 9, 45, true);
 	}
 
@@ -226,7 +229,7 @@ public class Int2HashJoinOperatorTest implements Serializable {
 		MutableObjectIterator<BinaryRow> probeInput = new UniformBinaryRowGenerator(numKeys2, probeValsPerKey, true);
 
 		HashJoinType type = HashJoinType.BUILD_LEFT_ANTI;
-		StreamOperator operator = newOperator(33 * 32 * 1024, type, false);
+		Object operator = newOperator(33 * 32 * 1024, type, false);
 		joinAndAssert(operator, buildInput, probeInput, 10, 1, 45, true);
 	}
 
@@ -236,64 +239,71 @@ public class Int2HashJoinOperatorTest implements Serializable {
 			boolean leftOut, boolean rightOut, boolean buildLeft,
 			int expectOutSize, int expectOutKeySize, int expectOutVal) throws Exception {
 		HashJoinType type = HashJoinType.of(buildLeft, leftOut, rightOut);
-		StreamOperator operator = newOperator(33 * 32 * 1024, type, !buildLeft);
+		Object operator = newOperator(33 * 32 * 1024, type, !buildLeft);
 		joinAndAssert(operator, buildInput, probeInput, expectOutSize, expectOutKeySize, expectOutVal, false);
 	}
 
 	static void joinAndAssert(
-			StreamOperator operator,
+			Object operator,
 			MutableObjectIterator<BinaryRow> input1,
 			MutableObjectIterator<BinaryRow> input2,
 			int expectOutSize,
 			int expectOutKeySize,
 			int expectOutVal,
 			boolean semiJoin) throws Exception {
-		joinAndAssert(operator, input1, input2, expectOutSize, expectOutKeySize, expectOutVal, semiJoin, true);
-	}
-
-	static void joinAndAssert(
-			StreamOperator operator,
-			MutableObjectIterator<BinaryRow> input1,
-			MutableObjectIterator<BinaryRow> input2,
-			int expectOutSize,
-			int expectOutKeySize,
-			int expectOutVal,
-			boolean semiJoin,
-			boolean invokeEndInput) throws Exception {
-		BaseRowTypeInfo typeInfo = new BaseRowTypeInfo(InternalTypes.INT, InternalTypes.INT);
+		BaseRowTypeInfo typeInfo = new BaseRowTypeInfo(new IntType(), new IntType());
 		BaseRowTypeInfo baseRowType = new BaseRowTypeInfo(
-				InternalTypes.INT, InternalTypes.INT, InternalTypes.INT, InternalTypes.INT);
+				new IntType(), new IntType(), new IntType(), new IntType());
 		TwoInputStreamTaskTestHarness<BinaryRow, BinaryRow, JoinedRow> testHarness =
-			new TwoInputStreamTaskTestHarness<>(TwoInputStreamTask::new,
+			new TwoInputStreamTaskTestHarness<>(
+					(operator instanceof InputSelectable || operator instanceof StreamOperatorFactory) ?
+							TwoInputSelectableStreamTask::new :
+							TwoInputStreamTask::new,
 				2, 1, new int[]{1, 2}, typeInfo, (TypeInformation) typeInfo, baseRowType);
 		testHarness.memorySize = 36 * 1024 * 1024;
 		testHarness.getExecutionConfig().enableObjectReuse();
 		testHarness.setupOutputForSingletonOperatorChain();
-		testHarness.getStreamConfig().setStreamOperator(operator);
+		if (operator instanceof StreamOperator) {
+			testHarness.getStreamConfig().setStreamOperator((StreamOperator<?>) operator);
+		} else {
+			testHarness.getStreamConfig().setStreamOperatorFactory((StreamOperatorFactory<?>) operator);
+		}
 		testHarness.getStreamConfig().setOperatorID(new OperatorID());
 
 		testHarness.invoke();
 		testHarness.waitForTaskRunning();
 
-		BinaryRow row1;
-		while ((row1 = input1.next()) != null) {
-			testHarness.processElement(new StreamRecord<>(row1), 0, 0);
-		}
-		testHarness.waitForInputProcessing();
-		if (invokeEndInput) {
-			endInput1(testHarness);
-		}
+		Random random = new Random();
+		do {
+			BinaryRow row1 = null;
+			BinaryRow row2 = null;
 
-		BinaryRow row2;
-		while ((row2 = input2.next()) != null) {
-			testHarness.processElement(new StreamRecord<>(row2), 1, 0);
-		}
-		testHarness.waitForInputProcessing();
-		if (invokeEndInput) {
-			endInput2(testHarness);
-		}
+			if (random.nextInt(2) == 0) {
+				row1 = input1.next();
+				if (row1 == null) {
+					row2 = input2.next();
+				}
+			} else {
+				row2 = input2.next();
+				if (row2 == null) {
+					row1 = input1.next();
+				}
+			}
 
-		testHarness.endInput();
+			if (row1 == null && row2 == null) {
+				break;
+			}
+
+			if (row1 != null) {
+				testHarness.processElement(new StreamRecord<>(row1), 0 , 0);
+			} else {
+				testHarness.processElement(new StreamRecord<>(row2), 1 , 0);
+			}
+		} while (true);
+
+		testHarness.endInput(0, 0);
+		testHarness.endInput(1, 0);
+
 		testHarness.waitForInputProcessing();
 		testHarness.waitForTaskCompletion();
 
@@ -389,29 +399,13 @@ public class Int2HashJoinOperatorTest implements Serializable {
 		}
 	}
 
-	static void endInput1(TwoInputStreamTaskTestHarness harness) throws Exception {
-		StreamOperator op = ((OperatorChain) harness.getTask().getStreamStatusMaintainer()).getHeadOperator();
-		if (op instanceof TwoInputOperatorWrapper) {
-			op = ((TwoInputOperatorWrapper) op).getOperator();
-		}
-		op.getClass().getMethod("endInput1").invoke(op);
-	}
-
-	static void endInput2(TwoInputStreamTaskTestHarness harness) throws Exception {
-		StreamOperator op = ((OperatorChain) harness.getTask().getStreamStatusMaintainer()).getHeadOperator();
-		if (op instanceof TwoInputOperatorWrapper) {
-			op = ((TwoInputOperatorWrapper) op).getOperator();
-		}
-		op.getClass().getMethod("endInput2").invoke(op);
-	}
-
-	public StreamOperator newOperator(long memorySize, HashJoinType type, boolean reverseJoinFunction) {
+	public Object newOperator(long memorySize, HashJoinType type, boolean reverseJoinFunction) {
 		return HashJoinOperator.newHashJoinOperator(
 				memorySize, memorySize, 0, type,
 				new GeneratedJoinCondition("", "", new Object[0]) {
 					@Override
 					public JoinCondition newInstance(ClassLoader classLoader) {
-						return (in1, in2) -> true;
+						return new TrueCondition();
 					}
 				},
 				reverseJoinFunction, new boolean[]{true},
@@ -428,6 +422,17 @@ public class Int2HashJoinOperatorTest implements Serializable {
 					}
 				},
 				false, 20, 10000,
-				10000, new RowType(InternalTypes.INT));
+				10000, RowType.of(new IntType()));
+	}
+
+	/**
+	 * Test util.
+	 */
+	public static class TrueCondition extends AbstractRichFunction implements JoinCondition {
+
+		@Override
+		public boolean apply(BaseRow in1, BaseRow in2) {
+			return true;
+		}
 	}
 }

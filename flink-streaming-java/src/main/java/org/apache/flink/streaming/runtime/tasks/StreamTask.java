@@ -51,12 +51,16 @@ import org.apache.flink.streaming.api.operators.StreamOperator;
 import org.apache.flink.streaming.api.operators.StreamTaskStateInitializer;
 import org.apache.flink.streaming.api.operators.StreamTaskStateInitializerImpl;
 import org.apache.flink.streaming.runtime.io.RecordWriterOutput;
+import org.apache.flink.streaming.runtime.io.StreamInputProcessor;
 import org.apache.flink.streaming.runtime.partitioner.ConfigurableStreamPartitioner;
 import org.apache.flink.streaming.runtime.partitioner.StreamPartitioner;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 import org.apache.flink.streaming.runtime.streamstatus.StreamStatusMaintainer;
+import org.apache.flink.streaming.runtime.tasks.mailbox.Mailbox;
+import org.apache.flink.streaming.runtime.tasks.mailbox.MailboxImpl;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.Preconditions;
+import org.apache.flink.util.function.ThrowingRunnable;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -68,6 +72,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -124,6 +129,12 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
 	/** The logger used by the StreamTask and its subclasses. */
 	private static final Logger LOG = LoggerFactory.getLogger(StreamTask.class);
 
+	/** Special value, letter that terminates the mailbox loop. */
+	private static final Runnable POISON_LETTER = () -> {};
+
+	/** Special value, letter that "wakes up" a waiting mailbox loop. */
+	private static final Runnable DEFAULT_ACTION_AVAILABLE = () -> {};
+
 	// ------------------------------------------------------------------------
 
 	/**
@@ -131,6 +142,12 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
 	 * ensure that we don't have concurrent method calls that void consistent checkpoints.
 	 */
 	private final Object lock = new Object();
+
+	/**
+	 * The input processor. Initialized in {@link #init()} method.
+	 */
+	@Nullable
+	protected StreamInputProcessor inputProcessor;
 
 	/** the head operator that consumes the input streams of this task. */
 	protected OP headOperator;
@@ -173,14 +190,13 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
 	private ExecutorService asyncOperationsThreadPool;
 
 	/** Handler for exceptions during checkpointing in the stream task. Used in synchronous part of the checkpoint. */
-	private CheckpointExceptionHandler synchronousCheckpointExceptionHandler;
-
-	/** Wrapper for synchronousCheckpointExceptionHandler to deal with rethrown exceptions. Used in the async part. */
-	private AsyncCheckpointExceptionHandler asynchronousCheckpointExceptionHandler;
+	private CheckpointExceptionHandler checkpointExceptionHandler;
 
 	private final List<RecordWriter<SerializationDelegate<StreamRecord<OUT>>>> recordWriters;
 
 	private final SynchronousSavepointLatch syncSavepointLatch;
+
+	protected final Mailbox mailbox;
 
 	// ------------------------------------------------------------------------
 
@@ -214,6 +230,7 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
 		this.accumulatorMap = getEnvironment().getAccumulatorRegistry().getUserMap();
 		this.recordWriters = createRecordWriters(configuration, environment);
 		this.syncSavepointLatch = new SynchronousSavepointLatch();
+		this.mailbox = new MailboxImpl();
 	}
 
 	// ------------------------------------------------------------------------
@@ -222,11 +239,48 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
 
 	protected abstract void init() throws Exception;
 
-	protected abstract void run() throws Exception;
+	protected void cancelTask() throws Exception {
+	}
 
-	protected abstract void cleanup() throws Exception;
+	protected void cleanup() throws Exception {
+		if (inputProcessor != null) {
+			inputProcessor.close();
+		}
+	}
 
-	protected abstract void cancelTask() throws Exception;
+	/**
+	 * This method implements the default action of the task (e.g. processing one event from the input). Implementations
+	 * should (in general) be non-blocking.
+	 *
+	 * @param context context object for collaborative interaction between the action and the stream task.
+	 * @throws Exception on any problems in the action.
+	 */
+	protected void performDefaultAction(ActionContext context) throws Exception {
+		if (!inputProcessor.processInput()) {
+			context.allActionsCompleted();
+		}
+	}
+
+	/**
+	 * Runs the stream-tasks main processing loop.
+	 */
+	private void run() throws Exception {
+		final ActionContext actionContext = new ActionContext();
+		while (true) {
+			if (mailbox.hasMail()) {
+				Optional<Runnable> maybeLetter;
+				while ((maybeLetter = mailbox.tryTakeMail()).isPresent()) {
+					Runnable letter = maybeLetter.get();
+					if (letter == POISON_LETTER) {
+						return;
+					}
+					letter.run();
+				}
+			}
+
+			performDefaultAction(actionContext);
+		}
+	}
 
 	/**
 	 * Emits the {@link org.apache.flink.streaming.api.watermark.Watermark#MAX_WATERMARK MAX_WATERMARK}
@@ -282,11 +336,8 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
 
 			CheckpointExceptionHandlerFactory cpExceptionHandlerFactory = createCheckpointExceptionHandlerFactory();
 
-			synchronousCheckpointExceptionHandler = cpExceptionHandlerFactory.createCheckpointExceptionHandler(
-				getExecutionConfig().isFailTaskOnCheckpointError(),
-				getEnvironment());
-
-			asynchronousCheckpointExceptionHandler = new AsyncCheckpointExceptionHandler(this);
+			checkpointExceptionHandler = cpExceptionHandlerFactory
+				.createCheckpointExceptionHandler(getEnvironment());
 
 			stateBackend = createStateBackend();
 			checkpointStorage = stateBackend.createCheckpointStorage(getEnvironment().getJobID());
@@ -426,6 +477,7 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
 
 	@Override
 	public final void cancel() throws Exception {
+		mailbox.clearAndPut(POISON_LETTER);
 		isRunning = false;
 		canceled = true;
 
@@ -555,6 +607,16 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
 	 */
 	public String getName() {
 		return getEnvironment().getTaskInfo().getTaskNameWithSubtasks();
+	}
+
+	/**
+	 * Gets the name of the task, appended with the subtask indicator and execution id.
+	 *
+	 * @return The name of the task, with subtask indicator and execution id.
+	 */
+	String getTaskNameWithSubtaskAndId() {
+		return getEnvironment().getTaskInfo().getTaskNameWithSubtasks() +
+			" (" + getEnvironment().getExecutionId() + ')';
 	}
 
 	/**
@@ -1010,9 +1072,12 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
 
 					// We only report the exception for the original cause of fail and cleanup.
 					// Otherwise this followup exception could race the original exception in failing the task.
-					owner.asynchronousCheckpointExceptionHandler.tryHandleCheckpointException(
-						checkpointMetaData,
-						checkpointException);
+					try {
+						owner.checkpointExceptionHandler.tryHandleCheckpointException(checkpointMetaData, checkpointException);
+					} catch (Exception unhandled) {
+						AsynchronousException asyncException = new AsynchronousException(unhandled);
+						owner.handleAsyncException("Failure in asynchronous checkpoint materialization", asyncException);
+					}
 
 					currentState = CheckpointingOperation.AsyncCheckpointState.DISCARDED;
 				} else {
@@ -1175,7 +1240,7 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
 					// operation, and without the failure, the task would go back to normal execution.
 					throw ex;
 				} else {
-					owner.synchronousCheckpointExceptionHandler.tryHandleCheckpointException(checkpointMetaData, ex);
+					owner.checkpointExceptionHandler.tryHandleCheckpointException(checkpointMetaData, ex);
 				}
 			}
 		}
@@ -1197,36 +1262,6 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
 			RUNNING,
 			DISCARDED,
 			COMPLETED
-		}
-	}
-
-	/**
-	 * Wrapper for synchronous {@link CheckpointExceptionHandler}. This implementation catches unhandled, rethrown
-	 * exceptions and reports them through {@link #handleAsyncException(String, Throwable)}. As this implementation
-	 * always handles the exception in some way, it never rethrows.
-	 */
-	static final class AsyncCheckpointExceptionHandler implements CheckpointExceptionHandler {
-
-		/** Owning stream task to which we report async exceptions. */
-		final StreamTask<?, ?> owner;
-
-		/** Synchronous exception handler to which we delegate. */
-		final CheckpointExceptionHandler synchronousCheckpointExceptionHandler;
-
-		AsyncCheckpointExceptionHandler(StreamTask<?, ?> owner) {
-			this.owner = Preconditions.checkNotNull(owner);
-			this.synchronousCheckpointExceptionHandler =
-				Preconditions.checkNotNull(owner.synchronousCheckpointExceptionHandler);
-		}
-
-		@Override
-		public void tryHandleCheckpointException(CheckpointMetaData checkpointMetaData, Exception exception) {
-			try {
-				synchronousCheckpointExceptionHandler.tryHandleCheckpointException(checkpointMetaData, exception);
-			} catch (Exception unhandled) {
-				AsynchronousException asyncException = new AsynchronousException(unhandled);
-				owner.handleAsyncException("Failure in asynchronous checkpoint materialization", asyncException);
-			}
 		}
 	}
 
@@ -1279,5 +1314,41 @@ public abstract class StreamTask<OUT, OP extends StreamOperator<OUT>>
 			.build(bufferWriter);
 		output.setMetricGroup(environment.getMetricGroup().getIOMetricGroup());
 		return output;
+	}
+
+	/**
+	 * The action context is passed as parameter into the default action method and holds control methods for feedback
+	 * of from the default action to the mailbox.
+	 */
+	public final class ActionContext {
+
+		private final Runnable actionUnavailableLetter = ThrowingRunnable.unchecked(mailbox::waitUntilHasMail);
+
+		/**
+		 * This method must be called to end the stream task when all actions for the tasks have been performed.
+		 */
+		public void allActionsCompleted() {
+			mailbox.clearAndPut(POISON_LETTER);
+		}
+
+		/**
+		 * Calling this method signals that the mailbox-thread should continue invoking the default action, e.g. because
+		 * new input became available for processing.
+		 *
+		 * @throws InterruptedException on interruption.
+		 */
+		public void actionsAvailable() throws InterruptedException {
+			mailbox.putMail(DEFAULT_ACTION_AVAILABLE);
+		}
+
+		/**
+		 * Calling this method signals that the mailbox-thread should (temporarily) stop invoking the default action,
+		 * e.g. because there is currently no input available.
+		 *
+		 * @throws InterruptedException on interruption.
+		 */
+		public void actionsUnavailable() throws InterruptedException {
+			mailbox.putMail(actionUnavailableLetter);
+		}
 	}
 }

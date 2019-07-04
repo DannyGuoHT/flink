@@ -18,11 +18,10 @@
 
 package org.apache.flink.table.codegen.agg.batch
 
-import org.apache.flink.streaming.api.operators.OneInputStreamOperator
-import org.apache.flink.table.`type`.{InternalType, InternalTypes, RowType}
-import org.apache.flink.table.`type`.TypeConverters.createInternalTypeFromTypeInfo
 import org.apache.flink.table.dataformat.BaseRow
-import org.apache.flink.table.runtime.OneInputOperatorWrapper
+import org.apache.flink.table.runtime.CodeGenOperatorFactory
+import org.apache.flink.table.types.TypeInfoLogicalTypeConverter.fromTypeInfoToLogicalType
+import org.apache.flink.table.types.logical.{BigIntType, DoubleType, LogicalType, RowType}
 
 import org.junit.Test
 
@@ -31,21 +30,21 @@ import org.junit.Test
   */
 class AggWithoutKeysTest extends BatchAggTestBase {
 
-  val localOutputType = new RowType(
-    Array[InternalType](
-      InternalTypes.LONG, InternalTypes.LONG,
-      InternalTypes.DOUBLE, InternalTypes.LONG,
-      createInternalTypeFromTypeInfo(imperativeAggFunc.getAccumulatorType)),
+  val localOutputType = RowType.of(
+    Array[LogicalType](
+      new BigIntType(), new BigIntType(),
+      new DoubleType(), new BigIntType(),
+      fromTypeInfoToLogicalType(imperativeAggFunc.getAccumulatorType)),
     Array(
       "agg1Buffer1", "agg1Buffer2",
       "agg2Buffer1", "agg2Buffer2",
       "agg3Buffer"))
 
-  override val globalOutputType = new RowType(
-    Array[InternalType](
-      InternalTypes.DOUBLE,
-      InternalTypes.DOUBLE,
-      InternalTypes.DOUBLE),
+  override val globalOutputType = RowType.of(
+    Array[LogicalType](
+      new DoubleType(),
+      new DoubleType(),
+      new DoubleType()),
     Array(
       "agg1Output",
       "agg2Output",
@@ -90,7 +89,7 @@ class AggWithoutKeysTest extends BatchAggTestBase {
   }
 
   private def getOperatorWithoutKey(isMerge: Boolean, isFinal: Boolean)
-    : (OneInputStreamOperator[BaseRow, BaseRow], RowType, RowType) = {
+    : (CodeGenOperatorFactory[BaseRow], RowType, RowType) = {
     val (iType, oType) = if (isMerge && isFinal) {
       (localOutputType, globalOutputType)
     } else if (!isMerge && isFinal) {
@@ -100,6 +99,6 @@ class AggWithoutKeysTest extends BatchAggTestBase {
     }
     val genOp = AggWithoutKeysCodeGenerator.genWithoutKeys(
       ctx, relBuilder, aggInfoList, iType, oType, isMerge, isFinal, "Without")
-    (new OneInputOperatorWrapper[BaseRow, BaseRow](genOp), iType, oType)
+    (new CodeGenOperatorFactory[BaseRow](genOp), iType, oType)
   }
 }

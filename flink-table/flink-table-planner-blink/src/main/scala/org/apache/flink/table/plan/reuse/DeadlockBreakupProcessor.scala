@@ -25,6 +25,7 @@ import org.apache.flink.table.api.TableException
 import org.apache.flink.table.plan.`trait`.FlinkRelDistribution
 import org.apache.flink.table.plan.nodes.exec.{BatchExecNode, ExecNode, ExecNodeVisitorImpl}
 import org.apache.flink.table.plan.nodes.physical.batch._
+import org.apache.flink.table.plan.nodes.process.{DAGProcessContext, DAGProcessor}
 
 import com.google.common.collect.{Maps, Sets}
 import org.apache.calcite.rel.RelNode
@@ -82,9 +83,10 @@ import scala.collection.mutable
   *                ScanTableSource
   * }}}
   */
-class DeadlockBreakupProcessor {
+class DeadlockBreakupProcessor extends DAGProcessor {
 
-  def process(rootNodes: util.List[ExecNode[_, _]]): util.List[ExecNode[_, _]] = {
+  def process(rootNodes: util.List[ExecNode[_, _]],
+      context: DAGProcessContext): util.List[ExecNode[_, _]] = {
     if (!rootNodes.forall(_.isInstanceOf[BatchExecNode[_]])) {
       throw new TableException("Only BatchExecNode DAG is supported now")
     }
@@ -182,12 +184,12 @@ class DeadlockBreakupProcessor {
     override def visit(node: ExecNode[_, _]): Unit = {
       super.visit(node)
       node match {
-        case hashJoin: BatchExecHashJoinBase =>
-          val joinInfo = hashJoin.joinInfo
+        case hashJoin: BatchExecHashJoin =>
+          val joinInfo = hashJoin.getJoinInfo
           val columns = if (hashJoin.leftIsBuild) joinInfo.rightKeys else joinInfo.leftKeys
           val distribution = FlinkRelDistribution.hash(columns)
           rewriteJoin(hashJoin, hashJoin.leftIsBuild, distribution)
-        case nestedLoopJoin: BatchExecNestedLoopJoinBase =>
+        case nestedLoopJoin: BatchExecNestedLoopJoin =>
           rewriteJoin(nestedLoopJoin, nestedLoopJoin.leftIsBuild, FlinkRelDistribution.ANY)
         case _ => // do nothing
       }
@@ -323,11 +325,11 @@ class DeadlockBreakupProcessor {
             true
           } else {
             node match {
-              case h: BatchExecHashJoinBase =>
+              case h: BatchExecHashJoin =>
                 val buildSideIndex = if (h.leftIsBuild) 0 else 1
                 val buildNode = h.getInputNodes.get(buildSideIndex)
                 checkJoinBuildSide(buildNode, idx, inputPath)
-              case n: BatchExecNestedLoopJoinBase =>
+              case n: BatchExecNestedLoopJoin =>
                 val buildSideIndex = if (n.leftIsBuild) 0 else 1
                 val buildNode = n.getInputNodes.get(buildSideIndex)
                 checkJoinBuildSide(buildNode, idx, inputPath)

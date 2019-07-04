@@ -75,7 +75,6 @@ import static org.junit.Assert.fail;
 public class LocalExecutorITCase extends TestLogger {
 
 	private static final String DEFAULTS_ENVIRONMENT_FILE = "test-sql-client-defaults.yaml";
-
 	private static final int NUM_TMS = 2;
 	private static final int NUM_SLOTS_PER_TM = 2;
 
@@ -119,13 +118,13 @@ public class LocalExecutorITCase extends TestLogger {
 
 		List<String> actualTables = executor.listTables(session);
 		List<String> expectedTables = Arrays.asList(
-			"AdditionalView1",
-			"AdditionalView2",
 			"TableNumber1",
 			"TableNumber2",
 			"TableSourceSink",
 			"TestView1",
-			"TestView2");
+			"TestView2",
+			"AdditionalView1",
+			"AdditionalView2");
 		assertEquals(expectedTables, actualTables);
 
 		session.removeView("AdditionalView1");
@@ -147,6 +146,30 @@ public class LocalExecutorITCase extends TestLogger {
 			"TestView1",
 			"TestView2");
 		assertEquals(expectedTables, actualTables);
+	}
+
+	@Test
+	public void testListCatalogs() throws Exception {
+		final Executor executor = createDefaultExecutor(clusterClient);
+		final SessionContext session = new SessionContext("test-session", new Environment());
+
+		final List<String> actualCatalogs = executor.listCatalogs(session);
+
+		final List<String> expectedCatalogs = Arrays.asList(
+			"default_catalog",
+			"catalog1");
+		assertEquals(expectedCatalogs, actualCatalogs);
+	}
+
+	@Test
+	public void testListDatabases() throws Exception {
+		final Executor executor = createDefaultExecutor(clusterClient);
+		final SessionContext session = new SessionContext("test-session", new Environment());
+
+		final List<String> actualDatabases = executor.listDatabases(session);
+
+		final List<String> expectedDatabases = Arrays.asList("default_database");
+		assertEquals(expectedDatabases, actualDatabases);
 	}
 
 	@Test
@@ -229,9 +252,9 @@ public class LocalExecutorITCase extends TestLogger {
 		final SessionContext session = new SessionContext("test-session", new Environment());
 
 		final List<String> expectedTableHints = Arrays.asList(
-			"TableNumber1",
-			"TableNumber2",
-			"TableSourceSink");
+			"default_catalog.default_database.TableNumber1",
+			"default_catalog.default_database.TableNumber2",
+			"default_catalog.default_database.TableSourceSink");
 		assertEquals(expectedTableHints, executor.completeStatement(session, "SELECT * FROM Ta", 16));
 
 		final List<String> expectedClause = Collections.singletonList("WHERE");
